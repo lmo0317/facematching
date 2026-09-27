@@ -6,6 +6,16 @@ let webcamStream = null;
 let currentSamplePresets = [];
 let currentAnalysisResult = null;
 
+// Dynamically detect base URL prefix (works at / or /facematching)
+function getBaseUrl() {
+  const path = window.location.pathname;
+  if (path.startsWith('/facematching')) {
+    return '/facematching';
+  }
+  return '';
+}
+const BASE_URL = getBaseUrl();
+
 document.addEventListener('DOMContentLoaded', () => {
   checkServerHealth();
   loadSamplePresetsList();
@@ -23,7 +33,7 @@ async function checkServerHealth() {
   const statusText = document.getElementById('status-text');
 
   try {
-    const res = await fetch('/api/health');
+    const res = await fetch(BASE_URL + '/api/health');
     const data = await res.json();
     
     if (data.backend?.status === 'connected' && data.backend?.multimodal_enabled) {
@@ -49,7 +59,7 @@ async function checkServerHealth() {
 // Fetch available sample presets
 async function loadSamplePresetsList() {
   try {
-    const res = await fetch('/api/samples');
+    const res = await fetch(BASE_URL + '/api/samples');
     const data = await res.json();
     currentSamplePresets = data.samples || [];
   } catch (err) {
@@ -63,13 +73,16 @@ async function loadSamplePreset(index) {
   if (!sample) return;
 
   try {
+    const url1 = sample.img1.startsWith('/') ? BASE_URL + sample.img1 : sample.img1;
+    const url2 = sample.img2.startsWith('/') ? BASE_URL + sample.img2 : sample.img2;
+
     // Set photo 1
-    const res1 = await fetch(sample.img1);
+    const res1 = await fetch(url1);
     const blob1 = await res1.blob();
     setPhotoFromBlob(blob1, 1, `${sample.id}_1.jpg`);
 
     // Set photo 2
-    const res2 = await fetch(sample.img2);
+    const res2 = await fetch(url2);
     const blob2 = await res2.blob();
     setPhotoFromBlob(blob2, 2, `${sample.id}_2.jpg`);
 
@@ -287,7 +300,7 @@ async function startComparison() {
       mode: 'detailed'
     };
 
-    const res = await fetch('/api/compare-json', {
+    const res = await fetch(BASE_URL + '/api/compare-json', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)

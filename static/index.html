@@ -8,7 +8,7 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
-  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="./static/css/style.css">
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -51,8 +51,12 @@
         </div>
       </div>
 
-      <!-- Server Status Badge -->
+      <!-- Server Status & Hub Link -->
       <div class="flex items-center space-x-3 text-xs">
+        <a href="/" class="hidden sm:flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 hover:text-white border border-white/10 transition">
+          <i data-lucide="layout-grid" class="w-3.5 h-3.5 text-indigo-400"></i>
+          <span>Service Hub 홈</span>
+        </a>
         <div id="server-status-pill" class="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-slate-800/80 border border-white/10">
           <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse" id="status-dot"></span>
           <span class="text-slate-300" id="status-text">112 서버 모델 확인 중...</span>
@@ -461,7 +465,7 @@
     </div>
   </footer>
 
-  <script src="/static/js/app.js"></script>
+  <script src="./static/js/app.js"></script>
   <script>
     // Initialize Lucide icons on load
     lucide.createIcons();

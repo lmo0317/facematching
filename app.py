@@ -45,8 +45,9 @@ SAMPLES_DIR = os.path.join(STATIC_DIR, "samples")
 os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(SAMPLES_DIR, exist_ok=True)
 
-# Mount static folder
+# Mount static folder (supports both /static and /facematching/static)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/facematching/static", StaticFiles(directory=STATIC_DIR), name="static_facematching")
 
 
 def process_image_to_base64(image_bytes: bytes, max_dim: int = 768) -> str:
@@ -130,6 +131,8 @@ class CompareJsonRequest(BaseModel):
 
 
 @app.get("/", response_class=HTMLResponse)
+@app.get("/facematching", response_class=HTMLResponse)
+@app.get("/facematching/", response_class=HTMLResponse)
 async def serve_index():
     index_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_path):
@@ -138,6 +141,7 @@ async def serve_index():
 
 
 @app.get("/api/health")
+@app.get("/facematching/api/health")
 async def health_check():
     """Check connectivity to Gemma 4 llama-server."""
     backend_status = "unknown"
@@ -179,6 +183,7 @@ async def health_check():
 
 
 @app.get("/api/samples")
+@app.get("/facematching/api/samples")
 async def get_samples():
     """List sample image pairs available for instant testing."""
     sample_pairs = [
@@ -211,6 +216,7 @@ async def get_samples():
 
 
 @app.post("/api/compare")
+@app.post("/facematching/api/compare")
 async def compare_images(
     image1: Optional[UploadFile] = File(None),
     image2: Optional[UploadFile] = File(None),
@@ -230,6 +236,7 @@ async def compare_images(
 
 
 @app.post("/api/compare-json")
+@app.post("/facematching/api/compare-json")
 async def compare_images_json(req: CompareJsonRequest):
     """JSON base64 comparison endpoint."""
     # Ensure data url format
