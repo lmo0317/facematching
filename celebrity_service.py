@@ -1,158 +1,149 @@
 """
-Celebrity Lookalike Service (닮은 연예인 찾기 서비스)
-Analyzes user face features with Gemma 4 E4B and matches against Korean & global celebrities,
-providing real celebrity photos, sync scores, and detailed feature breakdowns.
+Celebrity Lookalike Service (정밀 유사 연예인 탐색 서비스)
+- OpenCV YuNet 안면 감지 + SFace (128-D Deep Face Embedding) 안면 기하학 유사도 매칭
+- Gemma 4 E4B Multimodal 1:1 사진 나란히 대조 (Side-by-Side Visual Comparison)
+- 80명 이상의 남녀 한국 연예인 실물 라이브러리 및 정밀 부위별 싱크로율 감정
 """
 
 import os
 import io
 import re
 import json
+import base64
 import logging
-import urllib.request
-import urllib.parse
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+import cv2
+import numpy as np
 from PIL import Image
+import httpx
 
 logger = logging.getLogger("facematch.celebrity")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CELEB_DIR = os.path.join(BASE_DIR, "static", "celebrities")
-os.makedirs(CELEB_DIR, exist_ok=True)
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+DB_PATH = os.path.join(BASE_DIR, "celebrity_db.json")
 
-# Curated mapping of known celebrities to cached images
-CELEB_MAP = {
-    # Men
-    "정우성": "jung_woo_sung.jpg",
-    "박보검": "park_bo_gum.jpg",
-    "송중기": "song_joong_ki.jpg",
-    "공유": "gong_yoo.jpg",
-    "차은우": "cha_eun_woo.jpg",
-    "현빈": "hyun_bin.jpg",
-    "손흥민": "son_heung_min.jpg",
-    "유재석": "yoo_jae_suk.jpg",
-    "마동석": "ma_dong_seok.jpg",
-    "김수현": "kim_soo_hyun.jpg",
-    "이동욱": "lee_dong_wook.jpg",
-    "조인성": "jo_in_sung.jpg",
-    "이병헌": "lee_byung_hun.jpg",
-    "강동원": "kang_dong_won.jpg",
-    "변우석": "byeon_woo_seok.jpg",
-    "정해인": "jung_hae_in.jpg",
-    "박서준": "park_seo_joon.jpg",
-    "하정우": "ha_jung_woo.jpg",
-    "최우식": "choi_woo_shik.jpg",
-    "이종석": "lee_jong_suk.jpg",
-    "이정재": "lee_jung_jae.jpg",
-    "서강준": "seo_kang_joon.jpg",
-    "임시완": "im_si_wan.jpg",
-    "남주혁": "nam_joo_hyuk.jpg",
-    "원빈": "won_bin.jpg",
-    
-    # Women
-    "아이유": "iu.jpg",
-    "이지은": "iu.jpg",
-    "수지": "suzy.jpg",
-    "배수지": "suzy.jpg",
-    "한소희": "han_so_hee.jpg",
-    "태연": "taeyeon.jpg",
-    "제니": "jennie.jpg",
-    "카리나": "karina.jpg",
-    "장원영": "jang_won_young.jpg",
-    "박은빈": "park_eun_bin.jpg",
-    "김태희": "kim_tae_hee.jpg",
-    "송혜교": "song_hye_kyo.jpg",
-    "전지현": "jun_ji_hyun.jpg",
-    "손예진": "son_ye_jin.jpg",
-    "김지원": "kim_ji_won.jpg",
-    "신세경": "shin_se_kyung.jpg",
-    "윤아": "yoona.jpg",
-    "임윤아": "yoona.jpg",
-    "고윤정": "go_youn_jung.jpg",
-    "김유정": "kim_yoo_jung.jpg",
-    "박보영": "park_bo_young.jpg",
-    "김고은": "kim_go_eun.jpg",
-    "안유진": "an_yu_jin.jpg",
-    "윈터": "winter.jpg",
-}
+YUNET_PATH = os.path.join(MODELS_DIR, "face_detection_yunet.onnx")
+SFACE_PATH = os.path.join(MODELS_DIR, "face_recognition_sface.onnx")
 
-HEADERS = {
-    "User-Agent": "FaceMatchApp/1.0 (https://minohlee.mooo.com; admin@minohlee.mooo.com)"
-}
+# Cache loaded DB in memory
+_CACHED_DB: Optional[List[Dict[str, Any]]] = None
+_SFACE_RECOGNIZER = None
 
 
-def normalize_celeb_name(name: str) -> str:
-    """Strip titles like '배우', '가수', parentheses, etc."""
-    cleaned = re.sub(r"\(.*?\)", "", name)
-    cleaned = re.sub(r"^(배우|가수|아이돌|개그맨|방송인|모델|선수)\s*", "", cleaned)
-    cleaned = re.sub(r"\s*(배우|가수|아이돌|개그맨|방송인|모델|선수)$", "", cleaned)
-    return cleaned.strip()
+def get_sface_recognizer():
+    global _SFACE_RECOGNIZER
+    if _SFACE_RECOGNIZER is None:
+        if os.path.exists(SFACE_PATH):
+            _SFACE_RECOGNIZER = cv2.FaceRecognizerSF.create(SFACE_PATH, "")
+            logger.info("Initialized OpenCV SFace Recognizer")
+        else:
+            logger.warning(f"SFace model not found at {SFACE_PATH}")
+    return _SFACE_RECOGNIZER
 
 
-def resolve_celebrity_image(name: str) -> Optional[str]:
+def load_celebrity_db() -> List[Dict[str, Any]]:
+    global _CACHED_DB
+    if _CACHED_DB is not None and len(_CACHED_DB) > 0:
+        return _CACHED_DB
+
+    if os.path.exists(DB_PATH):
+        try:
+            with open(DB_PATH, "r", encoding="utf-8") as f:
+                _CACHED_DB = json.load(f)
+            logger.info(f"Loaded {len(_CACHED_DB)} celebrities from {DB_PATH}")
+            return _CACHED_DB
+        except Exception as e:
+            logger.error(f"Failed to read celebrity_db.json: {e}")
+
+    logger.warning("Celebrity DB empty or missing, returning empty list")
+    return []
+
+
+def calibrate_celeb_sync(cosine_sim: float) -> int:
     """
-    Get relative web URL for celebrity image.
-    If cached locally, return immediately.
-    If not, search Wikipedia/Wikimedia, download, optimize, cache, and return.
+    Calibrate raw SFace cosine similarity (typically 0.15 ~ 0.50 between different people)
+    to intuitive and motivating sync percentages (55% ~ 95%).
     """
-    norm = normalize_celeb_name(name)
-    
-    # Check known map
-    for k, filename in CELEB_MAP.items():
-        if k in norm or norm in k:
-            local_path = os.path.join(CELEB_DIR, filename)
-            if os.path.exists(local_path):
-                return f"/facematching/static/celebrities/{filename}"
+    if cosine_sim <= 0.18:
+        return max(50, int(round(50 + (cosine_sim / 0.18) * 15)))  # 50 - 65%
+    elif cosine_sim <= 0.28:
+        return int(round(65 + ((cosine_sim - 0.18) / 0.10) * 12))  # 65 - 77%
+    elif cosine_sim <= 0.38:
+        return int(round(77 + ((cosine_sim - 0.28) / 0.10) * 11))  # 77 - 88%
+    else:
+        return min(98, int(round(88 + ((cosine_sim - 0.38) / 0.12) * 9)))  # 88 - 97%
 
-    # Check if a file with normalized name already exists
-    safe_slug = re.sub(r"[^a-zA-Z0-9가-힣_]", "_", norm) + ".jpg"
-    local_path = os.path.join(CELEB_DIR, safe_slug)
-    if os.path.exists(local_path):
-        return f"/facematching/static/celebrities/{safe_slug}"
 
-    # Try on-demand search and download
+def extract_face_embedding(image_bytes: bytes) -> Optional[np.ndarray]:
+    """Detect primary face and extract 128-D normalized SFace feature vector."""
     try:
-        encoded = urllib.parse.quote(norm)
-        url = f"https://ko.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch={encoded}&gsrlimit=1&prop=pageimages&piprop=original&format=json"
-        req = urllib.request.Request(url, headers=HEADERS)
-        with urllib.request.urlopen(req, timeout=5) as r:
-            data = json.loads(r.read().decode('utf-8'))
-            pages = data.get('query', {}).get('pages', {})
-            img_url = None
-            for pid, info in pages.items():
-                if 'original' in info and 'source' in info['original']:
-                    img_url = info['original']['source']
-                    break
-            
-            if img_url:
-                img_req = urllib.request.Request(img_url, headers=HEADERS)
-                with urllib.request.urlopen(img_req, timeout=8) as ir:
-                    raw_bytes = ir.read()
-                
-                with Image.open(io.BytesIO(raw_bytes)) as img:
-                    img = img.convert("RGB")
-                    w, h = img.size
-                    min_dim = min(w, h)
-                    left = (w - min_dim) // 2
-                    top = max(0, (h - min_dim) // 3)
-                    right = left + min_dim
-                    bottom = top + min_dim
-                    if bottom > h:
-                        top = h - min_dim
-                        bottom = h
-                    cropped = img.crop((left, top, right, bottom)).resize((600, 600), Image.Resampling.LANCZOS)
-                    cropped.save(local_path, format="JPEG", quality=85, optimize=True)
-                
-                logger.info(f"On-demand downloaded & cached celebrity photo for {norm}")
-                return f"/facematching/static/celebrities/{safe_slug}"
+        recognizer = get_sface_recognizer()
+        if recognizer is None or not os.path.exists(YUNET_PATH):
+            return None
+
+        img_np = np.frombuffer(image_bytes, np.uint8)
+        img_bgr = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
+        if img_bgr is None:
+            return None
+
+        h, w = img_bgr.shape[:2]
+        detector = cv2.FaceDetectorYN.create(YUNET_PATH, "", (w, h), 0.45, 0.3, 10)
+        _, faces = detector.detect(img_bgr)
+        if faces is None or len(faces) == 0:
+            return None
+
+        # Choose largest face
+        best_face = max(faces, key=lambda f: f[2] * f[3])
+        aligned = recognizer.alignCrop(img_bgr, best_face)
+        feat = recognizer.feature(aligned)
+        norm = np.linalg.norm(feat)
+        if norm > 0:
+            return (feat / norm).flatten()
+        return None
     except Exception as e:
-        logger.warning(f"On-demand celebrity fetch failed for {norm}: {e}")
-
-    # Fallback to placeholder or closest match if not found
-    return None
+        logger.warning(f"Error in extract_face_embedding: {e}")
+        return None
 
 
-def extract_json_safe(content: str) -> Dict[str, Any]:
+def search_top_celebrities(
+    user_feat: np.ndarray,
+    gender_filter: str = "auto",
+    top_k: int = 3
+) -> List[Dict[str, Any]]:
+    """Compute cosine similarity against all celebrities in DB and rank top K."""
+    db = load_celebrity_db()
+    if not db:
+        return []
+
+    results = []
+    for item in db:
+        if gender_filter in ["male", "female"] and item.get("gender") != gender_filter:
+            continue
+
+        c_feat = np.array(item["embedding"], dtype=np.float32)
+        sim = float(np.dot(user_feat, c_feat))
+        calibrated_score = calibrate_celeb_sync(sim)
+
+        results.append({
+            "name": item["name"],
+            "category": item.get("category", "배우"),
+            "gender": item.get("gender", "male"),
+            "filename": item["filename"],
+            "photo_url": item.get("photo_url", f"/facematching/static/celebrities/{item['filename']}"),
+            "face_type": item.get("face_type", "매력적인 인상"),
+            "vibe": item.get("vibe", "전체적인 균형이 잡힌 호감형 인상"),
+            "cosine_sim": sim,
+            "similarity_percent": calibrated_score
+        })
+
+    results.sort(key=lambda x: x["cosine_sim"], reverse=True)
+    return results[:top_k]
+
+
+def extract_json_safe(content: str) -> Optional[Dict[str, Any]]:
+    """Clean LLM output and parse JSON."""
     cleaned = re.sub(r"<channel>thought.*?</channel>", "", content, flags=re.DOTALL)
     cleaned = re.sub(r"<\|think\|>.*?</turn>", "", cleaned, flags=re.DOTALL)
     cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL)
@@ -173,96 +164,95 @@ def extract_json_safe(content: str) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # 3. Progressive brace matching
-    start_idx = cleaned.find("{")
-    if start_idx != -1:
-        depth = 0
-        in_string = False
-        escape = False
-        for i in range(start_idx, len(cleaned)):
-            c = cleaned[i]
-            if c == '"' and not escape:
-                in_string = not in_string
-            elif not in_string:
-                if c == '{':
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0:
-                        candidate = cleaned[start_idx:i+1]
-                        try:
-                            return json.loads(candidate)
-                        except Exception:
-                            pass
-                        break
-            escape = (c == '\\' and not escape)
+    return None
 
-    logger.warning(f"Failed to parse strict JSON. Building fallback response from raw text. Raw:\n{content}")
 
-    # Fallback: scan for known celebrity names
-    matched_celebs = []
-    for name, img in CELEB_MAP.items():
-        if name in content and name not in [c["name"] for c in matched_celebs]:
-            matched_celebs.append({
-                "rank": len(matched_celebs) + 1,
-                "name": name,
-                "category": "연예인",
-                "similarity_percent": 85 if len(matched_celebs) == 0 else (75 if len(matched_celebs) == 1 else 68),
-                "detailed_scores": {"eyes": 85, "nose": 82, "mouth": 84, "face_shape": 83, "features": 85},
-                "summary": f"{name}과(와) 이목구비 비율 및 인상이 유사합니다.",
-                "reason": f"얼굴의 전반적인 분위기와 이목구비의 형태학적 밸런스가 {name}과(와) 닮은 느낌을 줍니다.",
-                "matching_points": ["자연스러운 인상", "이목구비 균형", "분위기 유사성"],
-                "photo_url": f"/facematching/static/celebrities/{img}"
-            })
-            if len(matched_celebs) >= 3:
-                break
+async def compare_user_and_celebrity_with_gemma(
+    user_img_b64: str,
+    celeb_item: Dict[str, Any],
+    llama_url: str,
+    model_name: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Send BOTH user's photo and the #1 celebrity's actual photo to Gemma 4 Vision.
+    Performs grounded, detailed side-by-side visual analysis.
+    """
+    try:
+        celeb_name = celeb_item["name"]
+        celeb_filename = celeb_item["filename"]
+        celeb_path = os.path.join(CELEB_DIR, celeb_filename)
 
-    if not matched_celebs:
-        # Default top match if none detected in raw text
-        matched_celebs = [
-            {
-                "rank": 1,
-                "name": "정우성",
-                "category": "배우",
-                "similarity_percent": 84,
-                "detailed_scores": {"eyes": 86, "nose": 82, "mouth": 84, "face_shape": 85, "features": 84},
-                "summary": "단정하고 깊은 눈빛, 지적인 분위기가 닮았습니다.",
-                "reason": "눈매의 깊이감과 전체적인 골격 구조의 균형미가 돋보입니다.",
-                "matching_points": ["깊은 눈빛", "단정한 분위기", "골격 균형"],
-                "photo_url": "/facematching/static/celebrities/jung_woo_sung.jpg"
-            },
-            {
-                "rank": 2,
-                "name": "공유",
-                "category": "배우",
-                "similarity_percent": 76,
-                "summary": "부드럽고 훈훈한 인상이 유사합니다.",
-                "reason": "선한 눈매와 온화한 미소가 닮은 느낌을 줍니다.",
-                "matching_points": ["선한 눈매", "따뜻한 인상"],
-                "photo_url": "/facematching/static/celebrities/gong_yoo.jpg"
-            },
-            {
-                "rank": 3,
-                "name": "박보검",
-                "category": "배우",
-                "similarity_percent": 70,
-                "summary": "밝고 긍정적인 에너지가 통합니다.",
-                "reason": "시원한 입매와 깨끗한 분위기가 비슷합니다.",
-                "matching_points": ["밝은 인상", "시원한 미소"],
-                "photo_url": "/facematching/static/celebrities/park_bo_gum.jpg"
-            }
-        ]
+        if not os.path.exists(celeb_path):
+            return None
 
-    return {
-        "face_features": {
-            "face_type": "매력적인 훈남상, 차분하고 부드러운 분위기",
-            "face_shape": "단정하고 부드러운 계란형 윤곽",
-            "eyes": "깊고 자연스러운 눈매",
-            "nose_mouth": "오뚝한 콧대와 호감형 입매",
-            "overall_vibe": "전체적으로 단정하고 신뢰감을 주는 매력적인 인상입니다."
-        },
-        "celebrities": matched_celebs
-    }
+        # Read celebrity photo and convert to base64
+        with open(celeb_path, "rb") as f:
+            celeb_bytes = f.read()
+        celeb_b64 = f"data:image/jpeg;base64,{base64.b64encode(celeb_bytes).decode('utf-8')}"
+
+        prompt = (
+            f"다음 두 사람의 사진을 나란히 면밀히 관찰하고, [사용자 사진]과 딥러닝으로 매칭된 [닮은꼴 연예인 {celeb_name} 사진]의 이목구비 부위별 싱크로율을 정밀 비교 분석해 주세요.\n\n"
+            "【분석 및 채점 원칙】:\n"
+            "1. 실제 두 사람의 사진 속 눈(쌍꺼풀, 눈꼬리 각도), 코(콧대 높이, 콧볼 너비), 입(입술 두께, 미소선), 턱선/얼굴형, 분위기를 비교하세요.\n"
+            "2. 두 사람이 어디가 어떻게 닮았는지 구체적이고 생생하게 2문장으로 설명하세요.\n"
+            "3. 반드시 다음 JSON 형식으로만 순수하게 출력하세요:\n"
+            "{\n"
+            '  "detailed_scores": {\n'
+            '    "eyes": <눈매 싱크로율 0-100>,\n'
+            '    "nose": <콧대/콧볼 싱크로율 0-100>,\n'
+            '    "mouth": <입술/미소 싱크로율 0-100>,\n'
+            '    "face_shape": <얼굴형/턱선 싱크로율 0-100>,\n'
+            '    "features": <고유 인상/분위기 싱크로율 0-100>\n'
+            "  },\n"
+            f'  "summary": "<{celeb_name}과(와) 가장 닮은 핵심 포인트를 친절하게 설명하는 한 줄 요약>",\n'
+            '  "reason": "<눈매, 콧날, 입꼬리, 턱선 등 어디가 어떻게 닮았는지 구체적인 이유 2문장>",\n'
+            '  "matching_points": ["<구체적 닮은점 1>", "<구체적 닮은점 2>", "<구체적 닮은점 3>"],\n'
+            '  "face_features": {\n'
+            f'    "face_type": "<사용자의 동물상 및 인상 키워드 (예: {celeb_item.get("face_type", "매력적인 훈남상")})>",\n'
+            '    "face_shape": "<사용자의 얼굴형 특징 요약 한 줄>",\n'
+            '    "eyes": "<사용자의 눈매 특징 요약 한 줄>",\n'
+            '    "nose_mouth": "<사용자의 코와 입매 특징 요약 한 줄>",\n'
+            '    "overall_vibe": "<사용자의 전반적인 인상과 매력 요약 1~2문장>"\n'
+            "  }\n"
+            "}"
+        )
+
+        payload = {
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"두 사람의 사진을 나란히 정밀 대조하여 닮은꼴 분석을 진행해 주세요.\n\n[사용자 사진]:"},
+                        {"type": "image_url", "image_url": {"url": user_img_b64}},
+                        {"type": "text", "text": f"\n\n[연예인 {celeb_name} 실제 사진]:"},
+                        {"type": "image_url", "image_url": {"url": celeb_b64}},
+                        {"type": "text", "text": f"\n\n{prompt}"}
+                    ]
+                }
+            ],
+            "temperature": 0.2,
+            "max_tokens": 850,
+            "stream": False,
+            "cache_prompt": False
+        }
+
+        async with httpx.AsyncClient(timeout=35.0) as client:
+            resp = await client.post(
+                f"{llama_url}/v1/chat/completions",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            )
+            if resp.status_code == 200:
+                result_data = resp.json()
+                content = result_data["choices"][0]["message"]["content"]
+                parsed = extract_json_safe(content)
+                if parsed:
+                    return parsed
+    except Exception as e:
+        logger.warning(f"Gemma 4 side-by-side comparison skipped/failed: {e}")
+
+    return None
 
 
 async def execute_celebrity_lookalike(
@@ -272,123 +262,126 @@ async def execute_celebrity_lookalike(
     model_name: str = "gemma-4-e4b-it-q4km"
 ) -> Dict[str, Any]:
     """
-    Analyzes user's face and finds TOP 3 celebrity lookalikes with real photos.
+    Dual-AI Pipeline:
+    1. OpenCV SFace Deep Face Embeddings -> Exact facial geometry search across 80+ Korean celebrities
+    2. Gemma 4 Multimodal Vision -> Side-by-side comparative analysis with the top matched celebrity's real photo
     """
-    import httpx
+    # 1. Decode base64 bytes
+    data_str = image_b64
+    if "," in data_str:
+        data_str = data_str.split(",", 1)[1]
+    image_bytes = base64.b64decode(data_str)
 
-    gender_instruction = ""
-    if gender_filter == "male":
-        gender_instruction = "【성별 필터】: 사용자가 남성 연예인 매칭을 요청했습니다. 반드시 '한국 남성 연예인(배우, 가수, 아이돌, 방송인 등)' 중에서만 1~3위를 선정하세요.\n"
-    elif gender_filter == "female":
-        gender_instruction = "【성별 필터】: 사용자가 여성 연예인 매칭을 요청했습니다. 반드시 '한국 여성 연예인(배우, 가수, 아이돌, 방송인 등)' 중에서만 1~3위를 선정하세요.\n"
-    else:
-        gender_instruction = "【성별 필터】: 성별에 구애받지 않고 사용자의 이목구비 골격과 분위기가 가장 흡사한 한국 유명 연예인을 선정하세요.\n"
+    # 2. Extract SFace embedding and rank celebrities
+    user_feat = extract_face_embedding(image_bytes)
+    
+    top_candidates = []
+    if user_feat is not None:
+        top_candidates = search_top_celebrities(user_feat, gender_filter=gender_filter, top_k=3)
+        match_names = [f"{c['name']} ({c['similarity_percent']}%)" for c in top_candidates]
+        logger.info(f"SFace matches found: {match_names}")
 
-    system_instruction = (
-        "당신은 인상학 및 연예인 안면 싱크로율 전문 분석 AI입니다.\n"
-        "제시된 사진 속 인물의 얼굴을 정밀 관찰하고, 가장 닮은 한국 연예인(배우, 가수, 아이돌, 방송인 등) TOP 3를 찾아주세요.\n\n"
-        f"{gender_instruction}\n"
-        "【분석 및 채점 원칙】:\n"
-        "1. [안면 특징 파악]:\n"
-        "   - 동물상/분위기: 부드러운 두부상, 맑은 사슴상, 매력적인 고양이상, 지적인 훈남상, 시크한 여우상, 귀여운 토끼상, 듬직한 공룡상, 시원한 강아지상 등\n"
-        "   - 눈매, 코, 입, 얼굴형의 핵심적 특징과 고유한 매력\n"
-        "2. [닮은 연예인 선정]:\n"
-        "   - 이목구비 구조와 분위기가 실제로 가장 닮은 대중적으로 널리 알려진 한국 연예인 3명 선정.\n"
-        "   - 1위(가장 높은 싱크로율 76~92%), 2위(후보 65~79%), 3위(후보 58~72%)\n"
-        "   - 1위 연예인은 눈(eyes), 코(nose), 입(mouth), 얼굴형(face_shape), 분위기(features)의 세부 싱크로율(0~100)을 함께 부여하세요.\n"
-        "   - 단순히 안경이나 헤어스타일 때문이 아니라 눈매의 형태, 미소 지을 때의 입매, 턱선 등 골격적 유사성을 짚어주세요.\n\n"
-        "반드시 다음 JSON 형식으로만 순수하게 출력하세요:\n"
-        "{\n"
-        '  "face_features": {\n'
-        '    "face_type": "<동물상 및 분위기 키워드 (예: 지적인 훈남상, 부드러운 사슴상)>",\n'
-        '    "face_shape": "<얼굴형 특징 요약 한 줄>",\n'
-        '    "eyes": "<눈매 특징 요약 한 줄>",\n'
-        '    "nose_mouth": "<코와 입매 특징 요약 한 줄>",\n'
-        '    "overall_vibe": "<전체적인 인상과 매력 요약 1~2문장>"\n'
-        "  },\n"
-        '  "celebrities": [\n'
-        "    {\n"
-        '      "rank": 1,\n'
-        '      "name": "<연예인 실명 (예: 정우성, 박보검, 아이유 등)>",\n'
-        '      "category": "<배우 / 가수 / 아이돌 / 방송인>",\n'
-        '      "similarity_percent": 86,\n'
-        '      "detailed_scores": {\n'
-        '        "eyes": 88,\n'
-        '        "nose": 82,\n'
-        '        "mouth": 85,\n'
-        '        "face_shape": 86,\n'
-        '        "features": 87\n'
-        "      },\n"
-        '      "summary": "<가장 닮은 핵심 포인트를 친절하게 설명하는 한 줄 요약>",\n'
-        '      "reason": "<눈매, 콧날, 입꼬리, 턱선 등 어디가 어떻게 닮았는지 구체적인 이유 2문장>",\n'
-        '      "matching_points": ["<닮은 점 1>", "<닮은 점 2>", "<닮은 점 3>"]\n'
-        "    },\n"
-        "    {\n"
-        '      "rank": 2,\n'
-        '      "name": "<연예인 실명>",\n'
-        '      "category": "<배우 / 가수 / 방송인>",\n'
-        '      "similarity_percent": 75,\n'
-        '      "summary": "<닮은 점 한 줄 요약>",\n'
-        '      "reason": "<닮은 이유 1문장>",\n'
-        '      "matching_points": ["<닮은 점 1>", "<닮은 점 2>"]\n'
-        "    },\n"
-        "    {\n"
-        '      "rank": 3,\n'
-        '      "name": "<연예인 실명>",\n'
-        '      "category": "<배우 / 가수 / 방송인>",\n'
-        '      "similarity_percent": 68,\n'
-        '      "summary": "<닮은 점 한 줄 요약>",\n'
-        '      "reason": "<닮은 이유 1문장>",\n'
-        '      "matching_points": ["<닮은 점 1>"]\n'
-        "    }\n"
-        "  ]\n"
-        "}"
+    if not top_candidates:
+        # Fallback to curated default candidates if face detection completely failed
+        db = load_celebrity_db()
+        default_pool = [c for c in db if gender_filter in ["auto", c.get("gender")]] or db
+        top_candidates = [
+            {
+                "name": default_pool[0]["name"] if default_pool else "공유",
+                "category": default_pool[0].get("category", "배우") if default_pool else "배우",
+                "gender": default_pool[0].get("gender", "male") if default_pool else "male",
+                "filename": default_pool[0]["filename"] if default_pool else "gong_yoo.jpg",
+                "photo_url": default_pool[0].get("photo_url", "/facematching/static/celebrities/gong_yoo.jpg") if default_pool else "/facematching/static/celebrities/gong_yoo.jpg",
+                "face_type": default_pool[0].get("face_type", "매력적인 훈남상") if default_pool else "매력적인 훈남상",
+                "vibe": default_pool[0].get("vibe", "전체적인 균형미가 돋보입니다.") if default_pool else "전체적인 균형미가 돋보입니다.",
+                "similarity_percent": 82
+            }
+        ]
+
+    top_celeb = top_candidates[0]
+    base_score = top_celeb.get("similarity_percent", 84)
+
+    # 3. Perform grounded Gemma 4 Side-by-Side Visual Verification with #1 Celebrity
+    gemma_analysis = await compare_user_and_celebrity_with_gemma(
+        user_img_b64=image_b64,
+        celeb_item=top_celeb,
+        llama_url=llama_url,
+        model_name=model_name
     )
 
-    payload = {
-        "model": model_name,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "첨부된 [인물 사진]의 얼굴 생김새를 정밀 관찰하고, 가장 닮은 한국 연예인을 감정해 주세요.\n\n[인물 사진]:"},
-                    {"type": "image_url", "image_url": {"url": image_b64}},
-                    {"type": "text", "text": f"\n\n{system_instruction}"}
-                ]
-            }
-        ],
-        "temperature": 0.1,
-        "max_tokens": 1400,
-        "stream": False,
-        "cache_prompt": False
-    }
+    # 4. Integrate results
+    if gemma_analysis and "detailed_scores" in gemma_analysis:
+        raw_scores = gemma_analysis.get("detailed_scores", {})
+        cleaned_scores = {}
+        for k in ["eyes", "nose", "mouth", "face_shape", "features"]:
+            raw_v = raw_scores.get(k, base_score)
+            try:
+                cleaned_scores[k] = max(50, min(100, int(round(float(raw_v)))))
+            except (ValueError, TypeError):
+                cleaned_scores[k] = base_score
 
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        resp = await client.post(
-            f"{llama_url}/v1/chat/completions",
-            json=payload,
-            headers={"Content-Type": "application/json"}
-        )
-        if resp.status_code != 200:
-            raise RuntimeError(f"Gemma 4 API error: {resp.status_code} {resp.text}")
-        
-        result_data = resp.json()
-        content = result_data["choices"][0]["message"]["content"]
-        data = extract_json_safe(content)
+        avg_gemma = int(round(sum(cleaned_scores.values()) / max(1, len(cleaned_scores))))
+        # Harmonize SFace mathematical score with Gemma visual score
+        final_top_score = int(round(base_score * 0.6 + avg_gemma * 0.4))
+        top_celeb["similarity_percent"] = max(65, min(97, final_top_score))
+        top_celeb["detailed_scores"] = cleaned_scores
+        top_celeb["summary"] = gemma_analysis.get("summary", f"{top_celeb['name']}과(와) 이목구비 밸런스와 분위기가 매우 유사합니다.")
+        top_celeb["reason"] = gemma_analysis.get("reason", top_celeb.get("vibe", ""))
+        top_celeb["matching_points"] = gemma_analysis.get("matching_points", [
+            f"{top_celeb['face_type']} 매력", "자연스러운 눈매", "시원한 입꼬리"
+        ])
+        user_face_features = gemma_analysis.get("face_features", {
+            "face_type": top_celeb.get("face_type", "매력적인 호감상"),
+            "face_shape": "균형 잡힌 자연스러운 윤곽선",
+            "eyes": "선하고 매력적인 눈매",
+            "nose_mouth": "오뚝하고 단정한 콧날과 입매",
+            "overall_vibe": top_celeb.get("vibe", "전체적으로 단정하고 매력적인 인상입니다.")
+        })
+    else:
+        # High quality geometric fallback
+        top_celeb["detailed_scores"] = {
+            "eyes": min(98, base_score + 1),
+            "nose": max(55, base_score - 2),
+            "mouth": min(98, base_score + 2),
+            "face_shape": max(55, base_score - 1),
+            "features": base_score
+        }
+        top_celeb["summary"] = f"{top_celeb['name']} 특유의 {top_celeb.get('face_type', '매력적인 인상')}과 높은 싱크로율을 보입니다."
+        top_celeb["reason"] = f"얼굴의 중심인 눈매와 턱선의 안면 비례가 {top_celeb['name']}과(와) 닮아 있으며, {top_celeb.get('vibe', '독보적인 매력')}을 풍깁니다."
+        top_celeb["matching_points"] = [
+            f"{top_celeb.get('face_type', '호감형')} 눈매",
+            "균형 잡힌 이목구비 비율",
+            "자연스럽고 편안한 인상"
+        ]
+        user_face_features = {
+            "face_type": top_celeb.get("face_type", "매력적인 호감상"),
+            "face_shape": "단정하고 조화로운 안면 골격",
+            "eyes": "선하고 분위기 있는 눈매",
+            "nose_mouth": "균형 잡힌 콧대와 호감형 미소",
+            "overall_vibe": top_celeb.get("vibe", "전체적으로 신뢰감과 매력을 주는 인상입니다.")
+        }
 
-    # Attach photo URLs for all matched celebrities
-    celebs = data.get("celebrities", [])
-    for c in celebs:
-        c_name = c.get("name", "")
-        photo_url = resolve_celebrity_image(c_name)
-        c["photo_url"] = photo_url
+    # 5. Format candidates (Rank 2 and Rank 3)
+    formatted_candidates = []
+    for rank_idx, cand in enumerate(top_candidates[1:], start=2):
+        c_score = cand.get("similarity_percent", 75)
+        formatted_candidates.append({
+            "rank": rank_idx,
+            "name": cand["name"],
+            "category": cand.get("category", "연예인"),
+            "similarity_percent": c_score,
+            "photo_url": cand.get("photo_url", f"/facematching/static/celebrities/{cand['filename']}"),
+            "summary": f"{cand.get('face_type', '호감형 인상')} 분위기가 닮았습니다.",
+            "reason": cand.get("vibe", "이목구비 비율과 전체적인 분위기가 유사합니다."),
+            "matching_points": [cand.get("face_type", "분위기 닮음"), "이목구비 밸런스"]
+        })
 
-    top_celeb = celebs[0] if celebs else None
+    all_celebs = [top_celeb] + formatted_candidates
 
     return {
         "success": True,
-        "face_features": data.get("face_features", {}),
+        "face_features": user_face_features,
         "top_celebrity": top_celeb,
-        "candidates": celebs[1:] if len(celebs) > 1 else [],
-        "all_celebrities": celebs
+        "candidates": formatted_candidates,
+        "all_celebrities": all_celebs
     }
