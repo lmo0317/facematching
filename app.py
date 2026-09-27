@@ -7,7 +7,7 @@ import logging
 from typing import Optional, List, Dict, Any
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -256,8 +256,12 @@ class DetectFacesRequest(BaseModel):
     image_base64: str
 
 
+@app.get("/facematching")
+async def redirect_facematching():
+    return RedirectResponse(url="/facematching/", status_code=302)
+
+
 @app.get("/", response_class=HTMLResponse)
-@app.get("/facematching", response_class=HTMLResponse)
 @app.get("/facematching/", response_class=HTMLResponse)
 async def serve_index():
     index_path = os.path.join(STATIC_DIR, "index.html")

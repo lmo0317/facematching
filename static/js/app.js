@@ -169,6 +169,12 @@ function handleDrop(e, targetId) {
   }
 }
 
+function triggerFileInput(targetId, e) {
+  if (e && e.target && e.target.closest('button')) return;
+  const input = document.getElementById(`file-input-${targetId}`);
+  if (input) input.click();
+}
+
 function handleFileSelect(e, targetId) {
   const files = e.target.files;
   if (files && files.length > 0) {
@@ -490,22 +496,6 @@ function selectDetectedFace(index, targetId) {
     width: box.width,
     height: box.height
   });
-}
-
-  modal.classList.remove('hidden');
-  modal.classList.add('flex');
-
-  if (cropImg.src === originalData && cropImg.complete) {
-    initCropper();
-  } else {
-    cropImg.onload = () => {
-      cropImg.onload = null;
-      initCropper();
-    };
-    cropImg.src = originalData;
-  }
-
-  lucide.createIcons();
 }
 
 function closeCropper() {
