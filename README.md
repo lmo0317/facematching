@@ -27,9 +27,11 @@
 
 ---
 
-## 🚀 배포 정보 (112 서버)
+## 🚀 배포 및 접속 정보 (112 서버)
 
-- **접속 주소**: [http://192.168.219.112:8501](http://192.168.219.112:8501)
+- **메인 포털(Service Hub)**: [http://192.168.219.112](http://192.168.219.112) 또는 [https://minohlee.mooo.com](https://minohlee.mooo.com)
+- **전용 서비스 경로**: [http://192.168.219.112/facematching/](http://192.168.219.112/facematching/) 또는 [https://minohlee.mooo.com/facematching/](https://minohlee.mooo.com/facematching/)
+- **포트 직접 접속**: [http://192.168.219.112:8501](http://192.168.219.112:8501)
 - **배포 위치**: `/home/lmo0317/apps/facematch`
 - **Gemma 4 LLM 엔드포인트**: `http://127.0.0.1:8081` (`llama-gemma4.service`)
   - 모델: `/home/lmo0317/models/gemma-4-E4B-it-Q4_K_M.gguf`
