@@ -1,6 +1,10 @@
 // Global application state
-let photo1Data = null; // dataURL or File
-let photo2Data = null; // dataURL or File
+let photo1Data = null; // dataURL (may be cropped/compressed)
+let photo2Data = null; // dataURL (may be cropped/compressed)
+let photo1OriginalData = null; // uncropped original dataURL
+let photo2OriginalData = null; // uncropped original dataURL
+let activeCropperTarget = null; // 1 or 2
+let cropperInstance = null; // Cropper.js instance
 let activeWebcamTarget = null;
 let webcamStream = null;
 let currentSamplePresets = [];
@@ -20,11 +24,27 @@ document.addEventListener('DOMContentLoaded', () => {
   checkServerHealth();
   loadSamplePresetsList();
   setupClipboardPaste();
+  setupKeyboardShortcuts();
 
   document.getElementById('btn-health-check')?.addEventListener('click', () => {
     checkServerHealth();
   });
 });
+
+function setupKeyboardShortcuts() {
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const cropModal = document.getElementById('crop-modal');
+      if (cropModal && !cropModal.classList.contains('hidden')) {
+        closeCropper();
+      }
+      const webcamModal = document.getElementById('webcam-modal');
+      if (webcamModal && !webcamModal.classList.contains('hidden')) {
+        closeWebcam();
+      }
+    }
+  });
+}
 
 // Check Gemma 4 llama-server connectivity
 async function checkServerHealth() {
@@ -195,8 +215,14 @@ async function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
     // Compress and scale image in browser canvas
     const { dataUrl, sizeInKb, width, height } = await compressImage(blob, 800, 0.85);
 
-    if (targetId === 1) photo1Data = dataUrl;
-    if (targetId === 2) photo2Data = dataUrl;
+    if (targetId === 1) {
+      photo1Data = dataUrl;
+      photo1OriginalData = dataUrl;
+    }
+    if (targetId === 2) {
+      photo2Data = dataUrl;
+      photo2OriginalData = dataUrl;
+    }
 
     // Show preview
     document.getElementById(`empty-state-${targetId}`).classList.add('hidden');
@@ -205,8 +231,11 @@ async function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
     previewContainer.classList.remove('hidden');
     previewImg.src = dataUrl;
 
-    // Show clear button
+    // Show clear and crop buttons, hide restore and cropped badge
     document.getElementById(`btn-clear-${targetId}`).classList.remove('hidden');
+    document.getElementById(`btn-crop-${targetId}`)?.classList.remove('hidden');
+    document.getElementById(`btn-restore-${targetId}`)?.classList.add('hidden');
+    document.getElementById(`badge-crop-${targetId}`)?.classList.add('hidden');
     
     // Display file name with optimization info
     const infoText = origSizeKb > 500 
@@ -222,12 +251,21 @@ async function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
     const reader = new FileReader();
     reader.onload = (e) => {
       const dataUrl = e.target.result;
-      if (targetId === 1) photo1Data = dataUrl;
-      if (targetId === 2) photo2Data = dataUrl;
+      if (targetId === 1) {
+        photo1Data = dataUrl;
+        photo1OriginalData = dataUrl;
+      }
+      if (targetId === 2) {
+        photo2Data = dataUrl;
+        photo2OriginalData = dataUrl;
+      }
       document.getElementById(`empty-state-${targetId}`).classList.add('hidden');
       document.getElementById(`preview-container-${targetId}`).classList.remove('hidden');
       document.getElementById(`preview-img-${targetId}`).src = dataUrl;
       document.getElementById(`btn-clear-${targetId}`).classList.remove('hidden');
+      document.getElementById(`btn-crop-${targetId}`)?.classList.remove('hidden');
+      document.getElementById(`btn-restore-${targetId}`)?.classList.add('hidden');
+      document.getElementById(`badge-crop-${targetId}`)?.classList.add('hidden');
       document.getElementById(`file-info-${targetId}`).textContent = `${filename} (${Math.round(blob.size / 1024)} KB)`;
       updateCompareButtonState();
       lucide.createIcons();
@@ -237,15 +275,198 @@ async function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
 }
 
 function clearPhoto(targetId) {
-  if (targetId === 1) photo1Data = null;
-  if (targetId === 2) photo2Data = null;
+  if (targetId === 1) {
+    photo1Data = null;
+    photo1OriginalData = null;
+  }
+  if (targetId === 2) {
+    photo2Data = null;
+    photo2OriginalData = null;
+  }
 
   document.getElementById(`empty-state-${targetId}`).classList.remove('hidden');
   document.getElementById(`preview-container-${targetId}`).classList.add('hidden');
   document.getElementById(`preview-img-${targetId}`).src = '';
   document.getElementById(`btn-clear-${targetId}`).classList.add('hidden');
+  document.getElementById(`btn-crop-${targetId}`)?.classList.add('hidden');
+  document.getElementById(`btn-restore-${targetId}`)?.classList.add('hidden');
+  document.getElementById(`badge-crop-${targetId}`)?.classList.add('hidden');
   document.getElementById(`file-info-${targetId}`).textContent = '선택된 파일 없음';
   document.getElementById(`file-input-${targetId}`).value = '';
+
+  updateCompareButtonState();
+}
+
+// --- Cropper.js Modal & Controls ---
+function openCropper(targetId) {
+  const originalData = targetId === 1 ? photo1OriginalData : photo2OriginalData;
+  if (!originalData) return;
+
+  activeCropperTarget = targetId;
+  const modal = document.getElementById('crop-modal');
+  const cropImg = document.getElementById('cropper-image');
+  const modalTitle = document.getElementById('crop-modal-title');
+  
+  if (modalTitle) {
+    modalTitle.textContent = `사진 ${targetId} - 인물 얼굴 / 특정 영역 선택`;
+  }
+
+  // Helper to initialize cropper
+  const initCropper = () => {
+    if (cropperInstance) {
+      cropperInstance.destroy();
+      cropperInstance = null;
+    }
+    cropperInstance = new Cropper(cropImg, {
+      viewMode: 1, // Restrict crop box to within image boundary
+      dragMode: 'move',
+      autoCropArea: 0.7,
+      restore: false,
+      guides: true,
+      center: true,
+      highlight: true,
+      cropBoxMovable: true,
+      cropBoxResizable: true,
+      toggleDragModeOnDblclick: false,
+    });
+    setCropRatio(NaN);
+  };
+
+  modal.classList.remove('hidden');
+  modal.classList.add('flex');
+
+  if (cropImg.src === originalData && cropImg.complete) {
+    initCropper();
+  } else {
+    cropImg.onload = () => {
+      cropImg.onload = null;
+      initCropper();
+    };
+    cropImg.src = originalData;
+  }
+
+  lucide.createIcons();
+}
+
+function closeCropper() {
+  const modal = document.getElementById('crop-modal');
+  modal.classList.add('hidden');
+  modal.classList.remove('flex');
+  if (cropperInstance) {
+    cropperInstance.destroy();
+    cropperInstance = null;
+  }
+  activeCropperTarget = null;
+}
+
+function setCropRatio(ratio) {
+  if (!cropperInstance) return;
+  cropperInstance.setAspectRatio(ratio);
+
+  const ratioButtons = [
+    { id: 'ratio-free', match: isNaN(ratio) },
+    { id: 'ratio-1-1', match: ratio === 1 },
+    { id: 'ratio-4-3', match: typeof ratio === 'number' && Math.abs(ratio - 4/3) < 0.05 }
+  ];
+
+  ratioButtons.forEach(btn => {
+    const el = document.getElementById(btn.id);
+    if (!el) return;
+    if (btn.match) {
+      el.className = 'px-2.5 py-1 rounded-md bg-indigo-600 text-white font-medium transition shadow-sm';
+    } else {
+      el.className = 'px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium transition';
+    }
+  });
+}
+
+function cropperRotate(deg) {
+  if (cropperInstance) {
+    cropperInstance.rotate(deg);
+  }
+}
+
+function cropperZoom(ratio) {
+  if (cropperInstance) {
+    cropperInstance.zoom(ratio);
+  }
+}
+
+function cropperReset() {
+  if (cropperInstance) {
+    cropperInstance.reset();
+    setCropRatio(NaN);
+  }
+}
+
+async function applyCroppedImage() {
+  if (!cropperInstance || !activeCropperTarget) return;
+
+  const targetId = activeCropperTarget;
+  const croppedCanvas = cropperInstance.getCroppedCanvas({
+    maxWidth: 1024,
+    maxHeight: 1024,
+    imageSmoothingEnabled: true,
+    imageSmoothingQuality: 'high',
+  });
+
+  if (!croppedCanvas) {
+    alert('영역을 잘라내는 중 오류가 발생했습니다.');
+    return;
+  }
+
+  croppedCanvas.toBlob(async (blob) => {
+    if (!blob) return;
+
+    try {
+      const { dataUrl, sizeInKb, width, height } = await compressImage(blob, 800, 0.88);
+
+      if (targetId === 1) photo1Data = dataUrl;
+      if (targetId === 2) photo2Data = dataUrl;
+
+      // Update preview image
+      const previewImg = document.getElementById(`preview-img-${targetId}`);
+      previewImg.src = dataUrl;
+
+      // Show cropped badge & restore button
+      document.getElementById(`badge-crop-${targetId}`)?.classList.remove('hidden');
+      document.getElementById(`btn-restore-${targetId}`)?.classList.remove('hidden');
+
+      // Update info text
+      document.getElementById(`file-info-${targetId}`).textContent = 
+        `선택 영역 (${width}×${height}, ${sizeInKb} KB)`;
+
+      closeCropper();
+      updateCompareButtonState();
+      lucide.createIcons();
+    } catch (err) {
+      console.error('크롭 이미지 압축 실패:', err);
+      const dataUrl = croppedCanvas.toDataURL('image/jpeg', 0.85);
+      if (targetId === 1) photo1Data = dataUrl;
+      if (targetId === 2) photo2Data = dataUrl;
+      document.getElementById(`preview-img-${targetId}`).src = dataUrl;
+      document.getElementById(`badge-crop-${targetId}`)?.classList.remove('hidden');
+      document.getElementById(`btn-restore-${targetId}`)?.classList.remove('hidden');
+      closeCropper();
+      updateCompareButtonState();
+      lucide.createIcons();
+    }
+  }, 'image/jpeg', 0.9);
+}
+
+function restoreOriginalPhoto(targetId) {
+  const originalData = targetId === 1 ? photo1OriginalData : photo2OriginalData;
+  if (!originalData) return;
+
+  if (targetId === 1) photo1Data = originalData;
+  if (targetId === 2) photo2Data = originalData;
+
+  const previewImg = document.getElementById(`preview-img-${targetId}`);
+  previewImg.src = originalData;
+
+  document.getElementById(`badge-crop-${targetId}`)?.classList.add('hidden');
+  document.getElementById(`btn-restore-${targetId}`)?.classList.add('hidden');
+  document.getElementById(`file-info-${targetId}`).textContent = '원본 사진으로 복원됨';
 
   updateCompareButtonState();
 }

@@ -101,3 +101,30 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(99, 102, 241, 0.8);
 }
+
+/* Cropper.js Dark theme customizations */
+.cropper-view-box {
+  outline: 2px solid #6366f1 !important;
+  outline-color: #818cf8 !important;
+}
+.cropper-line {
+  background-color: #6366f1 !important;
+}
+.cropper-point {
+  background-color: #a5b4fc !important;
+  width: 8px !important;
+  height: 8px !important;
+  opacity: 0.9 !important;
+}
+.cropper-point.point-se {
+  width: 12px !important;
+  height: 12px !important;
+}
+.cropper-bg {
+  background-image: none !important;
+  background-color: #050811 !important;
+}
+.cropper-modal {
+  background-color: rgba(0, 0, 0, 0.75) !important;
+}
+
