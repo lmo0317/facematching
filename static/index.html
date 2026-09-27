@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FaceMatch AI - Gemma 4 E4B 기반 얼굴 유사도 정밀 대조 시스템</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+              900: '#312e81',
+            }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-[#0b0f19] text-slate-100 min-h-screen bg-grid-pattern relative selection:bg-indigo-500 selection:text-white pb-20">
+
+  <!-- Glow effects -->
+  <div class="fixed top-0 left-1/4 w-96 h-96 bg-indigo-600/15 rounded-full blur-3xl pointer-events-none -z-10"></div>
+  <div class="fixed top-1/3 right-1/4 w-96 h-96 bg-purple-600/15 rounded-full blur-3xl pointer-events-none -z-10"></div>
+
+  <!-- Header -->
+  <header class="border-b border-white/10 backdrop-blur-md bg-slate-900/60 sticky top-0 z-40">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-purple-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+          <i data-lucide="scan-face" class="w-6 h-6 text-white"></i>
+        </div>
+        <div>
+          <div class="flex items-center space-x-2">
+            <h1 class="text-lg font-bold bg-gradient-to-r from-white via-slate-200 to-indigo-300 bg-clip-text text-transparent">FaceMatch AI</h1>
+            <span class="text-[11px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-semibold border border-indigo-500/30">Gemma 4 E4B</span>
+          </div>
+          <p class="text-xs text-slate-400">사진 2장 인물 유사도 & 안면 생체 특징 정밀 감정</p>
+        </div>
+      </div>
+
+      <!-- Server Status Badge -->
+      <div class="flex items-center space-x-3 text-xs">
+        <div id="server-status-pill" class="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-slate-800/80 border border-white/10">
+          <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse" id="status-dot"></span>
+          <span class="text-slate-300" id="status-text">112 서버 모델 확인 중...</span>
+        </div>
+        <button id="btn-health-check" title="서버 상태 새로고침" class="p-1.5 rounded-lg bg-slate-800/60 hover:bg-slate-700/60 text-slate-400 hover:text-white transition">
+          <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
+
+    <!-- Hero / Description -->
+    <div class="text-center mb-8">
+      <h2 class="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+        두 장의 사진을 넣고 <span class="bg-gradient-to-r from-indigo-400 via-purple-300 to-pink-400 bg-clip-text text-transparent">얼마나 비슷한지</span> 확인하세요
+      </h2>
+      <p class="text-sm text-slate-400 mt-2 max-w-2xl mx-auto">
+        112 서버에서 구동 중인 <span class="text-indigo-400 font-semibold">Gemma 4 E4B 비전 멀티모달 LLM</span>이 두 인물의 얼굴형, 눈매, 콧대, 입술 및 고유 골격 특징을 정밀 대조하여 유사도 점수와 감정 소견을 제공합니다.
+      </p>
+    </div>
+
+    <!-- Quick Sample Presets -->
+    <div class="glass-card rounded-2xl p-4 mb-8">
+      <div class="flex flex-col sm:flex-row items-center justify-between gap-3">
+        <div class="flex items-center space-x-2 text-xs font-semibold text-slate-300">
+          <i data-lucide="sparkles" class="w-4 h-4 text-amber-400"></i>
+          <span>빠른 테스트 샘플 (클릭 시 자동 로드):</span>
+        </div>
+        <div class="flex flex-wrap gap-2 justify-center" id="sample-buttons">
+          <button onclick="loadSamplePreset(0)" class="px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/50 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+            <span>예제 1 (동일 인물 - 각도/조명)</span>
+          </button>
+          <button onclick="loadSamplePreset(1)" class="px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/50 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span>
+            <span>예제 2 (다른 인물 - 남성 A vs B)</span>
+          </button>
+          <button onclick="loadSamplePreset(2)" class="px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/50 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+            <span>예제 3 (다른 인물 - 안경 남녀 대조)</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Photo Upload Cards Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+
+      <!-- Photo 1 Card -->
+      <div class="glass-card rounded-2xl p-5 relative overflow-hidden flex flex-col">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center space-x-2">
+            <span class="flex items-center justify-center w-6 h-6 rounded-full bg-indigo-600 text-white text-xs font-bold">1</span>
+            <h3 class="font-bold text-sm text-slate-200">사진 1 (기준 인물 사진)</h3>
+          </div>
+          <button id="btn-clear-1" onclick="clearPhoto(1)" class="hidden text-xs text-rose-400 hover:text-rose-300 flex items-center space-x-1">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+            <span>지우기</span>
+          </button>
+        </div>
+
+        <!-- Dropzone 1 -->
+        <div id="dropzone-1" class="dropzone rounded-xl flex-1 min-h-[300px] flex flex-col items-center justify-center p-4 relative group"
+             ondragover="handleDragOver(event, 1)" ondragleave="handleDragLeave(event, 1)" ondrop="handleDrop(event, 1)">
+          
+          <input type="file" id="file-input-1" accept="image/*" class="hidden" onchange="handleFileSelect(event, 1)">
+
+          <!-- Empty State -->
+          <div id="empty-state-1" class="text-center p-6 flex flex-col items-center">
+            <div class="w-14 h-14 rounded-2xl bg-indigo-600/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 group-hover:scale-110 transition duration-200 mb-3">
+              <i data-lucide="image-plus" class="w-7 h-7"></i>
+            </div>
+            <p class="text-sm font-semibold text-slate-200 mb-1">사진을 끌어다 놓거나 클릭하세요</p>
+            <p class="text-xs text-slate-400 mb-4">PNG, JPG, WEBP 파일 지원 (Ctrl+V 붙여넣기 가능)</p>
+            
+            <div class="flex items-center space-x-2">
+              <button type="button" onclick="document.getElementById('file-input-1').click()" class="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition flex items-center space-x-1 shadow-md shadow-indigo-600/20">
+                <i data-lucide="upload" class="w-3.5 h-3.5"></i>
+                <span>파일 선택</span>
+              </button>
+              <button type="button" onclick="openWebcam(1)" class="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition flex items-center space-x-1 border border-slate-700">
+                <i data-lucide="camera" class="w-3.5 h-3.5"></i>
+                <span>카메라 촬영</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Preview State -->
+          <div id="preview-container-1" class="hidden w-full h-full relative flex items-center justify-center">
+            <img id="preview-img-1" src="" alt="사진 1 미리보기" class="max-h-[300px] w-auto max-w-full rounded-lg object-contain shadow-lg border border-white/10">
+            <div id="scan-line-1" class="scan-line hidden"></div>
+          </div>
+        </div>
+
+        <div class="mt-3 flex items-center justify-between text-xs text-slate-400">
+          <span id="file-info-1">선택된 파일 없음</span>
+          <span class="text-[11px] text-slate-500">정면 또는 얼굴이 잘 나온 사진 권장</span>
+        </div>
+      </div>
+
+      <!-- Photo 2 Card -->
+      <div class="glass-card rounded-2xl p-5 relative overflow-hidden flex flex-col">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center space-x-2">
+            <span class="flex items-center justify-center w-6 h-6 rounded-full bg-purple-600 text-white text-xs font-bold">2</span>
+            <h3 class="font-bold text-sm text-slate-200">사진 2 (비교 인물 사진)</h3>
+          </div>
+          <button id="btn-clear-2" onclick="clearPhoto(2)" class="hidden text-xs text-rose-400 hover:text-rose-300 flex items-center space-x-1">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+            <span>지우기</span>
+          </button>
+        </div>
+
+        <!-- Dropzone 2 -->
+        <div id="dropzone-2" class="dropzone rounded-xl flex-1 min-h-[300px] flex flex-col items-center justify-center p-4 relative group"
+             ondragover="handleDragOver(event, 2)" ondragleave="handleDragLeave(event, 2)" ondrop="handleDrop(event, 2)">
+          
+          <input type="file" id="file-input-2" accept="image/*" class="hidden" onchange="handleFileSelect(event, 2)">
+
+          <!-- Empty State -->
+          <div id="empty-state-2" class="text-center p-6 flex flex-col items-center">
+            <div class="w-14 h-14 rounded-2xl bg-purple-600/10 border border-purple-500/20 flex items-center justify-center text-purple-400 group-hover:scale-110 transition duration-200 mb-3">
+              <i data-lucide="image-plus" class="w-7 h-7"></i>
+            </div>
+            <p class="text-sm font-semibold text-slate-200 mb-1">사진을 끌어다 놓거나 클릭하세요</p>
+            <p class="text-xs text-slate-400 mb-4">PNG, JPG, WEBP 파일 지원 (Ctrl+V 붙여넣기 가능)</p>
+            
+            <div class="flex items-center space-x-2">
+              <button type="button" onclick="document.getElementById('file-input-2').click()" class="px-3.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-xs font-medium text-white transition flex items-center space-x-1 shadow-md shadow-purple-600/20">
+                <i data-lucide="upload" class="w-3.5 h-3.5"></i>
+                <span>파일 선택</span>
+              </button>
+              <button type="button" onclick="openWebcam(2)" class="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition flex items-center space-x-1 border border-slate-700">
+                <i data-lucide="camera" class="w-3.5 h-3.5"></i>
+                <span>카메라 촬영</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Preview State -->
+          <div id="preview-container-2" class="hidden w-full h-full relative flex items-center justify-center">
+            <img id="preview-img-2" src="" alt="사진 2 미리보기" class="max-h-[300px] w-auto max-w-full rounded-lg object-contain shadow-lg border border-white/10">
+            <div id="scan-line-2" class="scan-line hidden"></div>
+          </div>
+        </div>
+
+        <div class="mt-3 flex items-center justify-between text-xs text-slate-400">
+          <span id="file-info-2">선택된 파일 없음</span>
+          <span class="text-[11px] text-slate-500">다른 각도, 과거 사진, 닮은꼴 등 대조 가능</span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Action Section -->
+    <div class="flex flex-col items-center justify-center mb-12">
+      <button id="btn-compare" onclick="startComparison()" disabled
+              class="px-8 py-4 rounded-2xl bg-gradient-to-r from-indigo-600 via-indigo-500 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold text-base shadow-xl shadow-indigo-600/30 transition duration-200 flex items-center space-x-3 active:scale-95">
+        <i data-lucide="scan" class="w-5 h-5"></i>
+        <span>두 사진 정밀 유사도 대조 시작</span>
+      </button>
+      <p id="compare-hint" class="text-xs text-slate-400 mt-2">두 사진을 모두 등록하면 분석 버튼이 활성화됩니다.</p>
+    </div>
+
+    <!-- Loading / Scanning Indicator -->
+    <div id="loading-section" class="hidden glass-card rounded-2xl p-8 mb-12 text-center max-w-2xl mx-auto">
+      <div class="relative w-24 h-24 mx-auto mb-4">
+        <div class="absolute inset-0 rounded-full border-4 border-indigo-500/20 animate-ping"></div>
+        <div class="w-24 h-24 rounded-full border-4 border-t-indigo-500 border-r-purple-500 border-b-transparent border-l-transparent animate-spin flex items-center justify-center">
+          <i data-lucide="sparkles" class="w-8 h-8 text-indigo-400"></i>
+        </div>
+      </div>
+      <h3 class="text-lg font-bold text-white mb-2" id="loading-title">Gemma 4 E4B 비전 모델 분석 중...</h3>
+      <p class="text-xs text-indigo-300 mb-4" id="loading-step">1단계: 사진 최적화 및 안면 영역 인코딩</p>
+      
+      <!-- Progress Bar -->
+      <div class="w-full bg-slate-800 rounded-full h-2 overflow-hidden mb-2">
+        <div id="loading-bar" class="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all duration-300 w-1/4"></div>
+      </div>
+      <p class="text-[11px] text-slate-500">112 서버의 RTX 2070 SUPER GPU 가속으로 초당 100+ 토큰 속도로 분석합니다.</p>
+    </div>
+
+    <!-- Results Section -->
+    <section id="results-section" class="hidden space-y-6 mb-16">
+
+      <!-- Overall Similarity Card -->
+      <div class="glass-card rounded-3xl p-6 sm:p-8 relative overflow-hidden border border-indigo-500/30">
+        <div class="flex flex-col md:flex-row items-center justify-between gap-8">
+
+          <!-- Left: Big Score Meter -->
+          <div class="flex flex-col sm:flex-row items-center gap-6">
+            <!-- Circular Gauge -->
+            <div class="relative w-36 h-36 flex items-center justify-center flex-shrink-0">
+              <svg class="w-full h-full" viewBox="0 0 100 100">
+                <circle cx="50" cy="50" r="42" stroke="rgba(255, 255, 255, 0.08)" stroke-width="8" fill="none" />
+                <circle id="score-circle" class="gauge-circle" cx="50" cy="50" r="42" stroke="#6366f1" stroke-width="8" stroke-dasharray="264" stroke-dashoffset="264" stroke-linecap="round" fill="none" />
+              </svg>
+              <div class="absolute inset-0 flex flex-col items-center justify-center">
+                <span id="score-value" class="text-3xl sm:text-4xl font-black text-white">0%</span>
+                <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">유사도 점수</span>
+              </div>
+            </div>
+
+            <!-- Verdict & Summary -->
+            <div class="text-center sm:text-left">
+              <div class="inline-flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-bold mb-2 shadow-sm" id="verdict-badge">
+                <span id="verdict-dot" class="w-2 h-2 rounded-full bg-white"></span>
+                <span id="verdict-text">판정 결과</span>
+              </div>
+              <h3 id="verdict-summary" class="text-xl sm:text-2xl font-bold text-white mb-2">분석 요약 내용</h3>
+              <p class="text-xs text-slate-300 max-w-xl" id="verdict-desc">
+                두 사진의 안면 구조 및 이목구비 골격 특징을 비교 분석한 결과입니다.
+              </p>
+            </div>
+          </div>
+
+          <!-- Right: Actions -->
+          <div class="flex flex-col sm:flex-row md:flex-col gap-2 w-full md:w-auto">
+            <button onclick="copyReport()" class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition flex items-center justify-center space-x-2 border border-slate-700">
+              <i data-lucide="copy" class="w-4 h-4"></i>
+              <span>분석 결과 복사</span>
+            </button>
+            <button onclick="resetAll()" class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition flex items-center justify-center space-x-2 border border-slate-700">
+              <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
+              <span>새로운 사진 비교</span>
+            </button>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Component Scores Breakdown Grid -->
+      <div class="glass-card rounded-2xl p-6">
+        <h4 class="text-sm font-bold text-slate-200 mb-4 flex items-center space-x-2">
+          <i data-lucide="layers" class="w-4 h-4 text-indigo-400"></i>
+          <span>부위별 정밀 세부 일치도</span>
+        </h4>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+          <!-- Face Shape -->
+          <div class="bg-slate-900/60 rounded-xl p-4 border border-white/5">
+            <div class="flex justify-between items-center mb-1">
+              <span class="text-xs text-slate-400 font-medium">얼굴형 및 윤곽</span>
+              <span id="score-face-shape" class="text-xs font-bold text-indigo-400">0%</span>
+            </div>
+            <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mb-2">
+              <div id="bar-face-shape" class="bg-indigo-500 h-1.5 rounded-full transition-all duration-1000 w-0"></div>
+            </div>
+            <p class="text-[11px] text-slate-500">하악각, 이마, 광대 곡률</p>
+          </div>
+
+          <!-- Eyes -->
+          <div class="bg-slate-900/60 rounded-xl p-4 border border-white/5">
+            <div class="flex justify-between items-center mb-1">
+              <span class="text-xs text-slate-400 font-medium">눈매 및 눈썹</span>
+              <span id="score-eyes" class="text-xs font-bold text-indigo-400">0%</span>
+            </div>
+            <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mb-2">
+              <div id="bar-eyes" class="bg-indigo-500 h-1.5 rounded-full transition-all duration-1000 w-0"></div>
+            </div>
+            <p class="text-[11px] text-slate-500">쌍꺼풀, 눈꼬리, 내안각 거리</p>
+          </div>
+
+          <!-- Nose -->
+          <div class="bg-slate-900/60 rounded-xl p-4 border border-white/5">
+            <div class="flex justify-between items-center mb-1">
+              <span class="text-xs text-slate-400 font-medium">콧대 및 비폭</span>
+              <span id="score-nose" class="text-xs font-bold text-indigo-400">0%</span>
+            </div>
+            <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mb-2">
+              <div id="bar-nose" class="bg-indigo-500 h-1.5 rounded-full transition-all duration-1000 w-0"></div>
+            </div>
+            <p class="text-[11px] text-slate-500">비근부 높이, 코끝 형태</p>
+          </div>
+
+          <!-- Mouth -->
+          <div class="bg-slate-900/60 rounded-xl p-4 border border-white/5">
+            <div class="flex justify-between items-center mb-1">
+              <span class="text-xs text-slate-400 font-medium">입술 및 인중</span>
+              <span id="score-mouth" class="text-xs font-bold text-indigo-400">0%</span>
+            </div>
+            <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mb-2">
+              <div id="bar-mouth" class="bg-indigo-500 h-1.5 rounded-full transition-all duration-1000 w-0"></div>
+            </div>
+            <p class="text-[11px] text-slate-500">입술 두께, 입꼬리, 인중 비율</p>
+          </div>
+
+          <!-- Features -->
+          <div class="bg-slate-900/60 rounded-xl p-4 border border-white/5">
+            <div class="flex justify-between items-center mb-1">
+              <span class="text-xs text-slate-400 font-medium">고유 생체 특징</span>
+              <span id="score-features" class="text-xs font-bold text-indigo-400">0%</span>
+            </div>
+            <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mb-2">
+              <div id="bar-features" class="bg-indigo-500 h-1.5 rounded-full transition-all duration-1000 w-0"></div>
+            </div>
+            <p class="text-[11px] text-slate-500">점, 흉터, 골격 비대칭성</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Comparative Analysis Details Grid -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+        <!-- Similarities -->
+        <div class="glass-card rounded-2xl p-6">
+          <div class="flex items-center space-x-2 mb-3 text-emerald-400 font-bold text-sm">
+            <i data-lucide="check-circle-2" class="w-4 h-4"></i>
+            <span>주요 공통점 (Similarities)</span>
+          </div>
+          <ul id="list-similarities" class="space-y-2 text-xs text-slate-300">
+            <!-- Dynamic list items -->
+          </ul>
+        </div>
+
+        <!-- Differences -->
+        <div class="glass-card rounded-2xl p-6">
+          <div class="flex items-center space-x-2 mb-3 text-amber-400 font-bold text-sm">
+            <i data-lucide="alert-circle" class="w-4 h-4"></i>
+            <span>주요 차이점 (Differences)</span>
+          </div>
+          <ul id="list-differences" class="space-y-2 text-xs text-slate-300">
+            <!-- Dynamic list items -->
+          </ul>
+        </div>
+
+      </div>
+
+      <!-- Environmental Factors & Full Analysis Text -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+
+        <!-- Environmental Factors -->
+        <div class="glass-card rounded-2xl p-6 md:col-span-1">
+          <div class="flex items-center space-x-2 mb-3 text-indigo-400 font-bold text-sm">
+            <i data-lucide="sun-medium" class="w-4 h-4"></i>
+            <span>촬영 환경 및 외적 변수</span>
+          </div>
+          <p id="text-environmental" class="text-xs text-slate-300 leading-relaxed">
+            조명, 촬영 각도, 표정, 안경 등 외적 요인 분석
+          </p>
+        </div>
+
+        <!-- Comprehensive Report -->
+        <div class="glass-card rounded-2xl p-6 md:col-span-2">
+          <div class="flex items-center space-x-2 mb-3 text-purple-400 font-bold text-sm">
+            <i data-lucide="file-text" class="w-4 h-4"></i>
+            <span>Gemma 4 E4B 전문 감정 종합 소견</span>
+          </div>
+          <div class="bg-slate-900/80 rounded-xl p-4 border border-white/5">
+            <p id="text-comprehensive" class="text-xs text-slate-200 leading-relaxed whitespace-pre-line font-mono">
+              종합 분석 의견 로딩 중...
+            </p>
+          </div>
+        </div>
+
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- Webcam Modal -->
+  <div id="webcam-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden items-center justify-center p-4">
+    <div class="glass-card rounded-2xl max-w-lg w-full p-5 relative border border-white/10">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-sm font-bold text-white flex items-center space-x-2">
+          <i data-lucide="camera" class="w-4 h-4 text-indigo-400"></i>
+          <span>웹캠으로 사진 촬영</span>
+        </h3>
+        <button onclick="closeWebcam()" class="p-1 rounded-lg text-slate-400 hover:text-white">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <div class="relative bg-black rounded-xl overflow-hidden aspect-square mb-4 flex items-center justify-center">
+        <video id="webcam-video" autoplay playsinline class="w-full h-full object-cover"></video>
+        <canvas id="webcam-canvas" class="hidden"></canvas>
+      </div>
+
+      <div class="flex items-center justify-end space-x-3">
+        <button onclick="closeWebcam()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300">
+          취소
+        </button>
+        <button onclick="captureWebcam()" class="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white flex items-center space-x-1.5 shadow-lg shadow-indigo-600/30">
+          <i data-lucide="camera" class="w-4 h-4"></i>
+          <span>촬영하기</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer class="border-t border-white/5 py-8 mt-12 text-center text-xs text-slate-500">
+    <div class="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+      <div>
+        <span>FaceMatch AI • Powered by </span>
+        <strong class="text-slate-400">Google Gemma 4 E4B IT Q4_K_M (Vulkan MTMD)</strong>
+      </div>
+      <div>
+        <span>배포 서버: </span>
+        <span class="text-slate-400 font-mono">192.168.219.112 (NVIDIA RTX 2070 SUPER)</span>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/static/js/app.js"></script>
+  <script>
+    // Initialize Lucide icons on load
+    lucide.createIcons();
+  </script>
+</body>
+</html>

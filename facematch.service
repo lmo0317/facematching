@@ -1,0 +1,18 @@
+[Unit]
+Description=FaceMatch AI - Gemma 4 E4B Facial Similarity Web App
+After=network-online.target llama-gemma4.service
+Wants=llama-gemma4.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/lmo0317/apps/facematch
+ExecStart=/home/lmo0317/apps/facematch/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8501
+Environment=PORT=8501
+Environment=HOST=0.0.0.0
+Environment=LLAMA_SERVER_URL=http://127.0.0.1:8081
+Environment=MODEL_NAME=gemma-4-e4b-it-q4km
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
