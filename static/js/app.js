@@ -453,13 +453,18 @@ function renderDetectedFacesBar(targetId) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.id = `face-chip-${idx}`;
+    btn.title = `${face.label} - 클릭 시 영역 맞춤, 더블클릭 시 즉시 확정`;
     btn.className = 'face-chip flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/50 transition cursor-pointer text-xs group';
     btn.innerHTML = `
       <img src="${face.thumbnail}" class="w-6 h-6 rounded-full object-cover border border-white/20">
       <span class="font-medium text-slate-200 group-hover:text-white">${face.label}</span>
-      <span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">맞춤</span>
+      <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">선택</span>
     `;
     btn.onclick = () => selectDetectedFace(idx, targetId);
+    btn.ondblclick = () => {
+      selectDetectedFace(idx, targetId);
+      applyCroppedImage();
+    };
     chipsContainer.appendChild(btn);
   });
 
@@ -476,12 +481,18 @@ function selectDetectedFace(index, targetId) {
   activeFaceIndex = index;
   const face = faces[index];
 
+  // Update confirm button text in faces bar
+  const confirmBtnText = document.getElementById('crop-face-confirm-text');
+  if (confirmBtnText) {
+    confirmBtnText.textContent = `${face.label} 확정 (확인)`;
+  }
+
   // Highlight active chip
   faces.forEach((_, i) => {
     const chip = document.getElementById(`face-chip-${i}`);
     if (chip) {
       if (i === index) {
-        chip.className = 'face-chip flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-indigo-600/40 border-2 border-indigo-500 shadow-md shadow-indigo-600/40 text-white text-xs cursor-pointer';
+        chip.className = 'face-chip flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-emerald-950/60 border-2 border-emerald-500 shadow-md shadow-emerald-600/30 text-white text-xs cursor-pointer';
       } else {
         chip.className = 'face-chip flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/50 transition cursor-pointer text-xs group';
       }
