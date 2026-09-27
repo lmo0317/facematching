@@ -312,6 +312,11 @@ class DetectFacesRequest(BaseModel):
     image_base64: str
 
 
+class CelebrityMatchRequest(BaseModel):
+    image_base64: str
+    gender_filter: Optional[str] = "auto"
+
+
 @app.get("/facematching")
 async def redirect_facematching():
     return RedirectResponse(url="/facematching/", status_code=302)
@@ -469,6 +474,28 @@ async def compare_images_json(req: CompareJsonRequest):
         img2 = f"data:image/jpeg;base64,{img2}"
 
     return await execute_face_comparison(img1, img2, req.mode or "family")
+
+
+@app.post("/api/find-celebrity")
+@app.post("/facematching/api/find-celebrity")
+async def find_celebrity_endpoint(req: CelebrityMatchRequest):
+    """Analyze single user photo and find TOP 3 celebrity lookalikes with real photos."""
+    img = req.image_base64
+    if not img.startswith("data:"):
+        img = f"data:image/jpeg;base64,{img}"
+
+    try:
+        from celebrity_service import execute_celebrity_lookalike
+        result = await execute_celebrity_lookalike(
+            image_b64=img,
+            gender_filter=req.gender_filter or "auto",
+            llama_url=LLAMA_SERVER_URL,
+            model_name=MODEL_NAME
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Celebrity match error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"닮은 연예인 검색 중 오류 발생: {str(e)}")
 
 
 async def execute_face_comparison(img1_url: str, img2_url: str, mode: str = "family") -> Dict[str, Any]:

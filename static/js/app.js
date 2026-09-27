@@ -1,11 +1,17 @@
 // Global application state
+let currentMainTab = 'compare'; // 'compare' | 'celeb'
 let photo1Data = null; // dataURL (may be cropped/compressed)
 let photo2Data = null; // dataURL (may be cropped/compressed)
 let photo1OriginalData = null; // uncropped original dataURL
 let photo2OriginalData = null; // uncropped original dataURL
-let activeCropperTarget = null; // 1 or 2
+let photoCelebData = null; // dataURL for celebrity search
+let photoCelebOriginalData = null;
+let detectedFacesCeleb = [];
+let selectedCelebGender = 'auto'; // 'auto' | 'male' | 'female'
+
+let activeCropperTarget = null; // 1, 2, or 'celeb'
 let cropperInstance = null; // Cropper.js instance
-let activeWebcamTarget = null;
+let activeWebcamTarget = null; // 1, 2, or 'celeb'
 let webcamStream = null;
 let currentSamplePresets = [];
 let currentAnalysisResult = null;
@@ -14,24 +20,46 @@ let detectedFaces1 = []; // detected faces in photo 1
 let detectedFaces2 = []; // detected faces in photo 2
 let activeFaceIndex = null;
 
-function setAnalysisMode(mode) {
-  currentMode = mode;
-  const modes = ['family', 'celebrity', 'identical'];
-  modes.forEach(m => {
-    const btn = document.getElementById(`mode-${m}`);
+// Tab switcher between 2-Photo Compare and Celebrity Search
+function switchMainTab(tab) {
+  currentMainTab = tab;
+  const btnCompare = document.getElementById('tab-btn-compare');
+  const btnCeleb = document.getElementById('tab-btn-celeb');
+  const secCompare = document.getElementById('section-compare-tab');
+  const secCeleb = document.getElementById('section-celeb-tab');
+
+  if (tab === 'compare') {
+    secCompare.classList.remove('hidden');
+    secCeleb.classList.add('hidden');
+    btnCompare.className = 'px-5 sm:px-6 py-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 bg-gradient-to-r from-indigo-600 to-indigo-700 text-white shadow-lg shadow-indigo-600/30';
+    btnCeleb.className = 'px-5 sm:px-6 py-3 rounded-xl text-xs sm:text-sm font-bold text-slate-400 hover:text-white transition flex items-center space-x-2 hover:bg-slate-800/60';
+  } else {
+    secCompare.classList.add('hidden');
+    secCeleb.classList.remove('hidden');
+    btnCeleb.className = 'px-5 sm:px-6 py-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 bg-gradient-to-r from-pink-600 to-indigo-600 text-white shadow-lg shadow-pink-600/30';
+    btnCompare.className = 'px-5 sm:px-6 py-3 rounded-xl text-xs sm:text-sm font-bold text-slate-400 hover:text-white transition flex items-center space-x-2 hover:bg-slate-800/60';
+  }
+  lucide.createIcons();
+}
+
+function setCelebGenderFilter(gender) {
+  selectedCelebGender = gender;
+  ['auto', 'male', 'female'].forEach(g => {
+    const btn = document.getElementById(`celeb-filter-${g}`);
     if (!btn) return;
-    if (m === mode) {
-      btn.className = 'px-4 py-2 rounded-xl text-xs font-bold transition flex items-center space-x-1.5 bg-indigo-600 text-white shadow-md shadow-indigo-600/30';
+    if (g === gender) {
+      btn.className = 'px-3 py-1.5 rounded-md font-bold transition bg-gradient-to-r from-pink-600 to-indigo-600 text-white shadow';
     } else {
-      btn.className = 'px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white transition flex items-center space-x-1.5';
+      btn.className = 'px-3 py-1.5 rounded-md font-medium text-slate-400 hover:text-white transition';
     }
   });
+}
 
+function setAnalysisMode(mode) {
+  currentMode = mode;
   const btnText = document.querySelector('#btn-compare span');
   if (btnText) {
-    if (mode === 'family') btnText.textContent = '두 사람 얼마나 닮았나? 붕어빵 지수 측정';
-    else if (mode === 'celebrity') btnText.textContent = '두 사람 닮은꼴 싱크로율 측정';
-    else if (mode === 'identical') btnText.textContent = '두 사진 동일 인물 정밀 대조 시작';
+    btnText.textContent = '두 사람 얼마나 닮았나? 붕어빵 지수 측정';
   }
 }
 
@@ -253,10 +281,12 @@ async function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
     if (targetId === 1) {
       photo1Data = dataUrl;
       photo1OriginalData = dataUrl;
-    }
-    if (targetId === 2) {
+    } else if (targetId === 2) {
       photo2Data = dataUrl;
       photo2OriginalData = dataUrl;
+    } else if (targetId === 'celeb') {
+      photoCelebData = dataUrl;
+      photoCelebOriginalData = dataUrl;
     }
 
     // Show preview
@@ -282,6 +312,7 @@ async function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
     detectFaces(targetId, dataUrl);
 
     updateCompareButtonState();
+    updateCelebButtonState();
     lucide.createIcons();
   } catch (err) {
     console.error('이미지 압축 실패:', err);
@@ -292,10 +323,12 @@ async function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
       if (targetId === 1) {
         photo1Data = dataUrl;
         photo1OriginalData = dataUrl;
-      }
-      if (targetId === 2) {
+      } else if (targetId === 2) {
         photo2Data = dataUrl;
         photo2OriginalData = dataUrl;
+      } else if (targetId === 'celeb') {
+        photoCelebData = dataUrl;
+        photoCelebOriginalData = dataUrl;
       }
       document.getElementById(`empty-state-${targetId}`).classList.add('hidden');
       document.getElementById(`preview-container-${targetId}`).classList.remove('hidden');
@@ -310,10 +343,31 @@ async function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
       detectFaces(targetId, dataUrl);
       
       updateCompareButtonState();
+      updateCelebButtonState();
       lucide.createIcons();
     };
     reader.readAsDataURL(blob);
   }
+}
+
+function clearCelebPhoto() {
+  photoCelebData = null;
+  photoCelebOriginalData = null;
+  detectedFacesCeleb = [];
+  document.getElementById('empty-state-celeb')?.classList.remove('hidden');
+  document.getElementById('preview-container-celeb')?.classList.add('hidden');
+  const img = document.getElementById('preview-img-celeb');
+  if (img) img.src = '';
+  document.getElementById('btn-clear-celeb')?.classList.add('hidden');
+  document.getElementById('btn-crop-celeb')?.classList.add('hidden');
+  document.getElementById('btn-restore-celeb')?.classList.add('hidden');
+  document.getElementById('badge-crop-celeb')?.classList.add('hidden');
+  document.getElementById('face-detect-pill-celeb')?.classList.add('hidden');
+  const fileInfo = document.getElementById('file-info-celeb');
+  if (fileInfo) fileInfo.textContent = '선택된 파일 없음';
+  const inp = document.getElementById('file-input-celeb');
+  if (inp) inp.value = '';
+  updateCelebButtonState();
 }
 
 function clearPhoto(targetId) {
@@ -326,6 +380,10 @@ function clearPhoto(targetId) {
     photo2Data = null;
     photo2OriginalData = null;
     detectedFaces2 = [];
+  }
+  if (targetId === 'celeb') {
+    clearCelebPhoto();
+    return;
   }
 
   document.getElementById(`empty-state-${targetId}`).classList.remove('hidden');
@@ -357,7 +415,8 @@ async function detectFaces(targetId, dataUrl) {
     const data = await res.json();
     const faces = data.faces || [];
     if (targetId === 1) detectedFaces1 = faces;
-    if (targetId === 2) detectedFaces2 = faces;
+    else if (targetId === 2) detectedFaces2 = faces;
+    else if (targetId === 'celeb') detectedFacesCeleb = faces;
 
     if (faces.length > 0 && pill && countEl) {
       pill.classList.remove('hidden');
@@ -377,7 +436,7 @@ async function detectFaces(targetId, dataUrl) {
 
 // --- Cropper.js Modal & Controls ---
 function openCropper(targetId) {
-  const originalData = targetId === 1 ? photo1OriginalData : photo2OriginalData;
+  const originalData = targetId === 1 ? photo1OriginalData : (targetId === 2 ? photo2OriginalData : photoCelebOriginalData);
   if (!originalData) return;
 
   activeCropperTarget = targetId;
@@ -386,7 +445,9 @@ function openCropper(targetId) {
   const modalTitle = document.getElementById('crop-modal-title');
   
   if (modalTitle) {
-    modalTitle.textContent = `사진 ${targetId} - 인물 얼굴 / 특정 영역 선택`;
+    modalTitle.textContent = targetId === 'celeb'
+      ? '내 사진 - 얼굴 맞춤 선택'
+      : `사진 ${targetId} - 인물 얼굴 / 특정 영역 선택`;
   }
 
   // Helper to initialize cropper
@@ -430,7 +491,7 @@ function openCropper(targetId) {
 }
 
 function renderDetectedFacesBar(targetId) {
-  const faces = targetId === 1 ? detectedFaces1 : detectedFaces2;
+  const faces = targetId === 1 ? detectedFaces1 : (targetId === 2 ? detectedFaces2 : detectedFacesCeleb);
   const bar = document.getElementById('crop-faces-bar');
   const title = document.getElementById('crop-faces-title');
   const chipsContainer = document.getElementById('crop-faces-chips');
@@ -583,58 +644,69 @@ async function applyCroppedImage() {
       const { dataUrl, sizeInKb, width, height } = await compressImage(blob, 800, 0.88);
 
       if (targetId === 1) photo1Data = dataUrl;
-      if (targetId === 2) photo2Data = dataUrl;
+      else if (targetId === 2) photo2Data = dataUrl;
+      else if (targetId === 'celeb') photoCelebData = dataUrl;
 
       // Update preview image
       const previewImg = document.getElementById(`preview-img-${targetId}`);
-      previewImg.src = dataUrl;
+      if (previewImg) previewImg.src = dataUrl;
 
       // Show cropped badge & restore button
       document.getElementById(`badge-crop-${targetId}`)?.classList.remove('hidden');
       document.getElementById(`btn-restore-${targetId}`)?.classList.remove('hidden');
 
       // Update info text
-      document.getElementById(`file-info-${targetId}`).textContent = 
-        `선택 영역 (${width}×${height}, ${sizeInKb} KB)`;
+      const infoEl = document.getElementById(`file-info-${targetId}`);
+      if (infoEl) {
+        infoEl.textContent = `선택 영역 (${width}×${height}, ${sizeInKb} KB)`;
+      }
 
       closeCropper();
       updateCompareButtonState();
+      updateCelebButtonState();
       lucide.createIcons();
     } catch (err) {
       console.error('크롭 이미지 압축 실패:', err);
       const dataUrl = croppedCanvas.toDataURL('image/jpeg', 0.85);
       if (targetId === 1) photo1Data = dataUrl;
-      if (targetId === 2) photo2Data = dataUrl;
-      document.getElementById(`preview-img-${targetId}`).src = dataUrl;
+      else if (targetId === 2) photo2Data = dataUrl;
+      else if (targetId === 'celeb') photoCelebData = dataUrl;
+      const previewImg = document.getElementById(`preview-img-${targetId}`);
+      if (previewImg) previewImg.src = dataUrl;
       document.getElementById(`badge-crop-${targetId}`)?.classList.remove('hidden');
       document.getElementById(`btn-restore-${targetId}`)?.classList.remove('hidden');
       closeCropper();
       updateCompareButtonState();
+      updateCelebButtonState();
       lucide.createIcons();
     }
   }, 'image/jpeg', 0.9);
 }
 
 function restoreOriginalPhoto(targetId) {
-  const originalData = targetId === 1 ? photo1OriginalData : photo2OriginalData;
+  const originalData = targetId === 1 ? photo1OriginalData : (targetId === 2 ? photo2OriginalData : photoCelebOriginalData);
   if (!originalData) return;
 
   if (targetId === 1) photo1Data = originalData;
-  if (targetId === 2) photo2Data = originalData;
+  else if (targetId === 2) photo2Data = originalData;
+  else if (targetId === 'celeb') photoCelebData = originalData;
 
   const previewImg = document.getElementById(`preview-img-${targetId}`);
-  previewImg.src = originalData;
+  if (previewImg) previewImg.src = originalData;
 
   document.getElementById(`badge-crop-${targetId}`)?.classList.add('hidden');
   document.getElementById(`btn-restore-${targetId}`)?.classList.add('hidden');
-  document.getElementById(`file-info-${targetId}`).textContent = '원본 사진으로 복원됨';
+  const infoEl = document.getElementById(`file-info-${targetId}`);
+  if (infoEl) infoEl.textContent = '원본 사진으로 복원됨';
 
   updateCompareButtonState();
+  updateCelebButtonState();
 }
 
 function updateCompareButtonState() {
   const btn = document.getElementById('btn-compare');
   const hint = document.getElementById('compare-hint');
+  if (!btn) return;
 
   if (photo1Data && photo2Data) {
     btn.disabled = false;
@@ -647,6 +719,26 @@ function updateCompareButtonState() {
   }
 }
 
+function updateCelebButtonState() {
+  const btn = document.getElementById('btn-find-celeb');
+  const hint = document.getElementById('celeb-hint');
+  if (!btn) return;
+
+  if (photoCelebData) {
+    btn.disabled = false;
+    if (hint) {
+      hint.textContent = '내 사진 등록 완료! 버튼을 누르면 닮은 연예인 사진을 찾아옵니다.';
+      hint.className = 'text-xs text-pink-400 mt-2 font-medium';
+    }
+  } else {
+    btn.disabled = true;
+    if (hint) {
+      hint.textContent = '내 사진을 등록하면 닮은 연예인 찾기 버튼이 활성화됩니다.';
+      hint.className = 'text-xs text-slate-400 mt-2';
+    }
+  }
+}
+
 // Clipboard Paste Support (Ctrl+V)
 function setupClipboardPaste() {
   window.addEventListener('paste', (e) => {
@@ -656,13 +748,16 @@ function setupClipboardPaste() {
     for (let i = 0; i < items.length; i++) {
       if (items[i].type.indexOf('image') !== -1) {
         const file = items[i].getAsFile();
-        if (!photo1Data) {
-          setPhotoFromBlob(file, 1, '클립보드_사진1.png');
-        } else if (!photo2Data) {
-          setPhotoFromBlob(file, 2, '클립보드_사진2.png');
+        if (currentMainTab === 'celeb') {
+          setPhotoFromBlob(file, 'celeb', '클립보드_내사진.png');
         } else {
-          // Both full, replace photo 2
-          setPhotoFromBlob(file, 2, '클립보드_사진2.png');
+          if (!photo1Data) {
+            setPhotoFromBlob(file, 1, '클립보드_사진1.png');
+          } else if (!photo2Data) {
+            setPhotoFromBlob(file, 2, '클립보드_사진2.png');
+          } else {
+            setPhotoFromBlob(file, 2, '클립보드_사진2.png');
+          }
         }
         break;
       }
@@ -963,4 +1058,192 @@ function resetAll() {
   clearPhoto(2);
   document.getElementById('results-section').classList.add('hidden');
   window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// ==========================================
+// Celebrity Lookalike Finder Execution & UI
+// ==========================================
+async function startCelebritySearch() {
+  if (!photoCelebData) return;
+
+  const btn = document.getElementById('btn-find-celeb');
+  const loadingSection = document.getElementById('celeb-loading-section');
+  const resultsSection = document.getElementById('celeb-results-section');
+  const scanLine = document.getElementById('scan-line-celeb');
+
+  btn.disabled = true;
+  loadingSection.classList.remove('hidden');
+  resultsSection.classList.add('hidden');
+  scanLine?.classList.remove('hidden');
+
+  loadingSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+  const steps = [
+    { title: '이목구비 골격 및 동물상 분위기 분석 중...', step: '1단계: 얼굴형, 눈매, 코, 입매, 동물상 분위기 인코딩', progress: 25 },
+    { title: '한국 연예인 데이터베이스 싱크로율 매칭 중...', step: '2단계: 유명 배우, 아이돌, 방송인 중 가장 닮은 후보 탐색', progress: 50 },
+    { title: '가장 닮은 연예인 고화질 사진 로드 중...', step: '3단계: 1위 연예인 고화질 프로필 사진 검색 및 매칭', progress: 75 },
+    { title: '1:1 정밀 싱크로율 대조 및 감정서 작성 중...', step: '4단계: 세부 부위별 싱크로율 및 매력 포인트 도출', progress: 90 },
+  ];
+
+  let stepIdx = 0;
+  const timer = setInterval(() => {
+    stepIdx = (stepIdx + 1) % steps.length;
+    document.getElementById('celeb-loading-title').textContent = steps[stepIdx].title;
+    document.getElementById('celeb-loading-step').textContent = steps[stepIdx].step;
+    document.getElementById('celeb-loading-bar').style.width = `${steps[stepIdx].progress}%`;
+  }, 2000);
+
+  try {
+    const payload = {
+      image_base64: photoCelebData,
+      gender_filter: selectedCelebGender
+    };
+
+    const res = await fetch(BASE_URL + '/api/find-celebrity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    clearInterval(timer);
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || `서버 오류 (${res.status})`);
+    }
+
+    const json = await res.json();
+    renderCelebrityResults(json);
+
+  } catch (err) {
+    clearInterval(timer);
+    alert(`연예인 분석 중 오류가 발생했습니다: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    loadingSection.classList.add('hidden');
+    scanLine?.classList.add('hidden');
+  }
+}
+
+function renderCelebrityResults(data) {
+  const resultsSection = document.getElementById('celeb-results-section');
+  resultsSection.classList.remove('hidden');
+  resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  const top = data.top_celebrity || {};
+  const vibe = data.face_features || {};
+  const candidates = data.candidates || [];
+
+  // 1. Photos
+  document.getElementById('celeb-result-user-img').src = photoCelebData;
+  const matchImg = document.getElementById('celeb-result-match-img');
+  if (top.photo_url) {
+    matchImg.src = top.photo_url;
+  } else {
+    matchImg.src = BASE_URL + '/static/celebrities/jung_woo_sung.jpg';
+  }
+  document.getElementById('top-celeb-label').textContent = `${top.name || '연예인'} (${top.category || '배우'})`;
+
+  // 2. Titles & Summaries
+  document.getElementById('top-celeb-name').textContent = top.name || '알 수 없음';
+  document.getElementById('top-celeb-cat').textContent = `(${top.category || '연예인'})`;
+  document.getElementById('top-celeb-summary').textContent = top.summary || '';
+  document.getElementById('top-celeb-reason').textContent = top.reason || '';
+
+  // 3. Gauge Score & Counter
+  const score = Math.max(0, Math.min(100, top.similarity_percent || 85));
+  const circle = document.getElementById('celeb-score-circle');
+  const scoreValue = document.getElementById('celeb-score-value');
+  const radius = 42;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference - (score / 100) * circumference;
+  circle.style.strokeDashoffset = offset;
+
+  let currentVal = 0;
+  const counter = setInterval(() => {
+    currentVal += 2;
+    if (currentVal >= score) {
+      currentVal = score;
+      clearInterval(counter);
+    }
+    scoreValue.textContent = `${currentVal}%`;
+  }, 20);
+
+  const badge = document.getElementById('celeb-match-badge');
+  if (score >= 85) {
+    badge.textContent = '🔥 도플갱어 싱크로율 (완벽한 닮은꼴)';
+    badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-pink-500/20 text-pink-300 border border-pink-500/40';
+  } else if (score >= 75) {
+    badge.textContent = '✨ 매우 높은 닮은꼴 (한눈에 알아볼 정도)';
+    badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40';
+  } else {
+    badge.textContent = '💫 은근한 매력 닮은꼴 (분위기 싱크로)';
+    badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40';
+  }
+
+  // 4. Feature Bars
+  const det = top.detailed_scores || {
+    eyes: Math.min(100, score + 2),
+    nose: Math.max(50, score - 3),
+    mouth: Math.min(100, score + 1),
+    face_shape: Math.max(50, score - 2),
+    features: score
+  };
+
+  const setBar = (id, val) => {
+    const scoreEl = document.getElementById(`celeb-score-${id}`);
+    const barEl = document.getElementById(`celeb-bar-${id}`);
+    if (scoreEl) scoreEl.textContent = `${val}%`;
+    if (barEl) barEl.style.width = `${val}%`;
+  };
+  setBar('eyes', det.eyes || score);
+  setBar('nose', det.nose || score);
+  setBar('mouth', det.mouth || score);
+  setBar('face-shape', det.face_shape || score);
+  setBar('features', det.features || score);
+
+  // 5. Matching Points Tags
+  const pointsContainer = document.getElementById('top-celeb-points');
+  pointsContainer.innerHTML = '';
+  const pts = top.matching_points || ['선한 눈매', '자연스러운 미소', '턱선 비율'];
+  pts.forEach(p => {
+    const chip = document.createElement('span');
+    chip.className = 'px-2.5 py-1 rounded-lg bg-pink-500/15 text-pink-300 border border-pink-500/30 text-xs font-medium';
+    chip.textContent = `#${p}`;
+    pointsContainer.appendChild(chip);
+  });
+
+  // 6. User Vibe / Animal face
+  document.getElementById('user-vibe-type').textContent = vibe.face_type || '매력적인 훈남상';
+  document.getElementById('user-vibe-shape').textContent = vibe.face_shape || '부드러운 계란형 윤곽';
+  document.getElementById('user-vibe-eyes').textContent = vibe.eyes || '깊고 차분한 눈빛';
+  document.getElementById('user-vibe-nose-mouth').textContent = vibe.nose_mouth || '오뚝한 콧대와 단정한 입매';
+  document.getElementById('user-vibe-overall').textContent = vibe.overall_vibe || '전반적으로 단정하고 신뢰감을 주는 호감형 인상입니다.';
+
+  // 7. Candidates (2nd & 3rd)
+  const candContainer = document.getElementById('celeb-candidates-container');
+  candContainer.innerHTML = '';
+  candidates.forEach(c => {
+    const card = document.createElement('div');
+    card.className = 'glass-card rounded-2xl p-4 border border-white/10 flex items-center space-x-4 bg-slate-900/60';
+    
+    const photoUrl = c.photo_url || (BASE_URL + '/static/celebrities/gong_yoo.jpg');
+    const medal = c.rank === 2 ? '🥈 2위' : '🥉 3위';
+    card.innerHTML = `
+      <div class="w-16 h-16 rounded-xl overflow-hidden shrink-0 border border-white/10 bg-slate-800">
+        <img src="${photoUrl}" alt="${c.name}" class="w-full h-full object-cover" onerror="this.src='${BASE_URL}/static/celebrities/gong_yoo.jpg'">
+      </div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-xs font-bold text-amber-300">${medal}: ${c.name} <span class="text-[11px] text-slate-400 font-normal">(${c.category || '연예인'})</span></span>
+          <span class="px-2 py-0.5 rounded-full text-[11px] font-extrabold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">${c.similarity_percent || 75}%</span>
+        </div>
+        <p class="text-xs text-slate-300 truncate">${c.summary || c.reason || '분위기와 이목구비 비율이 유사합니다.'}</p>
+        <p class="text-[11px] text-slate-400 line-clamp-1 mt-0.5">${c.reason || ''}</p>
+      </div>
+    `;
+    candContainer.appendChild(card);
+  });
+
+  lucide.createIcons();
 }
