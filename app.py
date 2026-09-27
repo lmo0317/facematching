@@ -4,7 +4,7 @@ import re
 import json
 import base64
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
@@ -56,8 +56,38 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/facematching/static", StaticFiles(directory=STATIC_DIR), name="static_facematching")
 
 
+def compute_square_face_box(fx: int, fy: int, fw: int, fh: int, img_w: int, img_h: int, landmarks: Optional[List[float]] = None) -> Tuple[int, int, int, int]:
+    """Calculate balanced, square (1:1) bounding box centered on head with natural hair and chin margins."""
+    face_dim = max(fw, fh)
+    # Headshot crop: comfortable margin for hair headroom, ears, and chin/collar
+    crop_size = int(face_dim * 1.65)
+    crop_size = min(crop_size, img_w, img_h)
+    crop_size = max(crop_size, 30)
+
+    if landmarks is not None and len(landmarks) >= 4:
+        # Landmarks: right eye (rx, ry), left eye (lx, ly)
+        rx, ry, lx, ly = landmarks[0:4]
+        eye_cx = (rx + lx) / 2.0
+        eye_cy = (ry + ly) / 2.0
+        cx = int(eye_cx)
+        # Position eyes at ~38% from the top of the crop for balanced portrait framing
+        py = int(eye_cy - int(crop_size * 0.38))
+        px = int(cx - crop_size // 2)
+    else:
+        cx = fx + fw // 2
+        cy = fy + int(fh * 0.45)
+        px = cx - crop_size // 2
+        py = cy - int(crop_size * 0.45)
+
+    # Strictly clamp within image boundary while preserving 1:1 square ratio
+    px = max(0, min(img_w - crop_size, px))
+    py = max(0, min(img_h - crop_size, py))
+
+    return px, py, crop_size, crop_size
+
+
 def detect_faces_in_image(image_bytes: bytes) -> List[Dict[str, Any]]:
-    """Detect faces using YuNet (or Haar Cascade fallback) and return coordinates + thumbnails."""
+    """Detect faces using YuNet (or Haar Cascade fallback) and return balanced 1:1 coordinates + thumbnails."""
     try:
         img_pil = Image.open(io.BytesIO(image_bytes))
         img_pil = ImageOps.exif_transpose(img_pil)
@@ -92,19 +122,11 @@ def detect_faces_in_image(image_bytes: bytes) -> List[Dict[str, Any]]:
             for i, f in enumerate(sorted_faces):
                 fx, fy, fw, fh = map(int, f[0:4])
                 score = float(f[-1])
+                landmarks = [float(x) for x in f[4:14]] if len(f) >= 14 else None
 
-                pad_x = int(fw * 0.35)
-                pad_top = int(fh * 0.45)
-                pad_bottom = int(fh * 0.35)
+                px, py, pw, ph = compute_square_face_box(fx, fy, fw, fh, w, h, landmarks)
 
-                px1 = max(0, fx - pad_x)
-                py1 = max(0, fy - pad_top)
-                px2 = min(w, fx + fw + pad_x)
-                py2 = min(h, fy + fh + pad_bottom)
-                pw = px2 - px1
-                ph = py2 - py1
-
-                thumb = img_pil.crop((px1, py1, px2, py2))
+                thumb = img_pil.crop((px, py, px + pw, py + ph))
                 thumb = thumb.resize((80, 80), Image.Resampling.LANCZOS)
                 buf = io.BytesIO()
                 thumb.save(buf, format="JPEG", quality=85)
@@ -124,7 +146,7 @@ def detect_faces_in_image(image_bytes: bytes) -> List[Dict[str, Any]]:
                     "id": i + 1,
                     "label": label,
                     "box": {"x": fx, "y": fy, "width": fw, "height": fh},
-                    "padded_box": {"x": px1, "y": py1, "width": pw, "height": ph},
+                    "padded_box": {"x": px, "y": py, "width": pw, "height": ph},
                     "confidence": round(score, 2),
                     "thumbnail": thumb_b64
                 })
@@ -138,18 +160,9 @@ def detect_faces_in_image(image_bytes: bytes) -> List[Dict[str, Any]]:
                 if len(haar_faces) > 0:
                     sorted_faces = sorted(haar_faces, key=lambda x: x[0])
                     for i, (fx, fy, fw, fh) in enumerate(sorted_faces):
-                        pad_x = int(fw * 0.35)
-                        pad_top = int(fh * 0.45)
-                        pad_bottom = int(fh * 0.35)
+                        px, py, pw, ph = compute_square_face_box(int(fx), int(fy), int(fw), int(fh), w, h)
 
-                        px1 = max(0, fx - pad_x)
-                        py1 = max(0, fy - pad_top)
-                        px2 = min(w, fx + fw + pad_x)
-                        py2 = min(h, fy + fh + pad_bottom)
-                        pw = px2 - px1
-                        ph = py2 - py1
-
-                        thumb = img_pil.crop((px1, py1, px2, py2))
+                        thumb = img_pil.crop((px, py, px + pw, py + ph))
                         thumb = thumb.resize((80, 80), Image.Resampling.LANCZOS)
                         buf = io.BytesIO()
                         thumb.save(buf, format="JPEG", quality=85)
@@ -159,7 +172,7 @@ def detect_faces_in_image(image_bytes: bytes) -> List[Dict[str, Any]]:
                             "id": i + 1,
                             "label": f"인물 {i+1}",
                             "box": {"x": int(fx), "y": int(fy), "width": int(fw), "height": int(fh)},
-                            "padded_box": {"x": px1, "y": py1, "width": pw, "height": ph},
+                            "padded_box": {"x": px, "y": py, "width": pw, "height": ph},
                             "confidence": 0.85,
                             "thumbnail": thumb_b64
                         })

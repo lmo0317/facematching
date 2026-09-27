@@ -459,7 +459,7 @@ function openCropper(targetId) {
     cropperInstance = new Cropper(cropImg, {
       viewMode: 1, // Restrict crop box to within image boundary
       dragMode: 'move',
-      autoCropArea: 0.7,
+      autoCropArea: 0.8,
       restore: false,
       guides: true,
       center: true,
@@ -468,10 +468,15 @@ function openCropper(targetId) {
       cropBoxResizable: true,
       toggleDragModeOnDblclick: false,
       ready() {
-        renderDetectedFacesBar(targetId);
+        const faces = targetId === 1 ? detectedFaces1 : (targetId === 2 ? detectedFaces2 : detectedFacesCeleb);
+        if (faces && faces.length > 0) {
+          renderDetectedFacesBar(targetId);
+        } else {
+          setCropRatio(NaN);
+          renderDetectedFacesBar(targetId);
+        }
       }
     });
-    setCropRatio(NaN);
   };
 
   modal.classList.remove('hidden');
@@ -536,7 +541,7 @@ function renderDetectedFacesBar(targetId) {
 }
 
 function selectDetectedFace(index, targetId) {
-  const faces = targetId === 1 ? detectedFaces1 : detectedFaces2;
+  const faces = targetId === 1 ? detectedFaces1 : (targetId === 2 ? detectedFaces2 : detectedFacesCeleb);
   if (!faces || !faces[index] || !cropperInstance) return;
 
   activeFaceIndex = index;
@@ -560,13 +565,14 @@ function selectDetectedFace(index, targetId) {
     }
   });
 
-  // Fit Cropper.js box to detected face (padded coordinates)
+  // Set 1:1 aspect ratio and fit Cropper.js box to detected face (balanced 1:1 square)
+  setCropRatio(1);
   const box = face.padded_box;
   cropperInstance.setData({
-    x: box.x,
-    y: box.y,
-    width: box.width,
-    height: box.height
+    x: Math.round(box.x),
+    y: Math.round(box.y),
+    width: Math.round(box.width),
+    height: Math.round(box.height)
   });
 }
 
