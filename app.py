@@ -229,21 +229,77 @@ def extract_json_from_response(text: str) -> Dict[str, Any]:
     # 3. Fallback: Parse line by line or construct basic structure
     logger.warning("Failed to parse strict JSON, building fallback response from raw text")
     return {
-        "similarity_score": 75,
-        "verdict": "닮은꼴 분석 완료",
-        "verdict_summary": "이목구비 전반에서 유의미한 닮음 포인트가 관찰되었습니다. 상세 내용을 확인하세요.",
+        "similarity_score": 30,
+        "verdict": "서로 다른 생김새",
+        "verdict_summary": "두 사람의 이목구비 형태 대조가 완료되었습니다.",
         "detailed_scores": {
-            "face_shape": 75,
-            "eyes": 75,
-            "nose": 75,
-            "mouth": 75,
-            "features": 75
+            "face_shape": 30,
+            "eyes": 30,
+            "nose": 30,
+            "mouth": 30,
+            "features": 30
         },
         "similarities": ["세부 내용은 종합 분석을 확인하세요."],
         "differences": ["세부 내용은 종합 분석을 확인하세요."],
         "environmental_factors": "나이, 성별, 조명 및 각도 차이를 감안하여 분석함",
         "comprehensive_analysis": cleaned.strip()
     }
+
+
+def calibrate_similarity_score(raw_score: float) -> int:
+    """
+    Calibrate raw LLM vision score to human-perceived facial resemblance scale:
+    - Raw <= 40: Strangers -> 10% ~ 25% (서로 다른 생김새)
+    - Raw 40 ~ 50: Weak resemblance -> 25% ~ 45% (서로 다른 인물 / 남남)
+    - Raw 50 ~ 65: Moderate / Family -> 45% ~ 76% (은근한 닮음 ~ 높은 붕어빵)
+    - Raw 65 ~ 85: Strong Family / Lookalike -> 76% ~ 92% (완벽한 붕어빵)
+    - Raw > 85: Identical / Twin -> 92% ~ 99% (도플갱어 / 동일인 수준)
+    """
+    raw = float(raw_score)
+    if raw <= 40:
+        return max(10, int(round(10 + (raw / 40.0) * 15)))
+    elif raw <= 50:
+        return int(round(25 + ((raw - 40.0) / 10.0) * 20))
+    elif raw <= 65:
+        return int(round(45 + ((raw - 50.0) / 15.0) * 31))
+    elif raw <= 85:
+        return int(round(76 + ((raw - 65.0) / 20.0) * 16))
+    else:
+        return min(99, int(round(92 + ((raw - 85.0) / 15.0) * 7)))
+
+
+def get_verdict_for_score(score: int, mode: str = "family") -> str:
+    if mode == "identical":
+        if score >= 85:
+            return "동일 인물 확실"
+        elif score >= 70:
+            return "동일 인물 유력"
+        elif score >= 50:
+            return "동일인 가능성 낮음"
+        else:
+            return "다른 인물 (불일치)"
+    elif mode == "celebrity":
+        if score >= 85:
+            return "도플갱어 수준(판박이)"
+        elif score >= 70:
+            return "매우 높은 닮은꼴"
+        elif score >= 50:
+            return "은근한 분위기 닮은꼴"
+        elif score >= 35:
+            return "부분적 닮음"
+        else:
+            return "서로 다른 생김새"
+    else:  # family
+        if score >= 82:
+            return "완벽한 붕어빵 (판박이)"
+        elif score >= 68:
+            return "매우 높은 붕어빵 지수"
+        elif score >= 50:
+            return "은근한 닮음 / 부분 닮음"
+        elif score >= 35:
+            return "낮은 닮음 (미미한 유사성)"
+        else:
+            return "서로 다른 생김새 (남남)"
 
 
 class CompareJsonRequest(BaseModel):
@@ -416,7 +472,7 @@ async def compare_images_json(req: CompareJsonRequest):
 
 
 async def execute_face_comparison(img1_url: str, img2_url: str, mode: str = "family") -> Dict[str, Any]:
-    """Call Gemma 4 E4B multimodal LLM and perform facial similarity/resemblance evaluation."""
+    """Call Gemma 4 E4B multimodal LLM and perform calibrated facial similarity/resemblance evaluation."""
     
     if mode == "identical":
         mode_title = "동일 인물 정밀 대조 (신원 확인)"
@@ -424,85 +480,71 @@ async def execute_face_comparison(img1_url: str, img2_url: str, mode: str = "fam
             "【분석 모드: 동일 인물 정밀 대조 (신원 확인)】\n"
             "목적: 제시된 [사진 1]과 [사진 2]가 실제 '동일한 한 사람'의 사진인지 과학적이고 엄격하게 판별합니다.\n"
             "판정 가이드라인:\n"
-            "- 성별, 영구적 안면 골격 비율, 귀 모양, 눈코입의 절대적 거리 비례를 분석합니다.\n"
-            "- 점수 기준 (0~100점):\n"
-            "   * 85 ~ 100점: 동일 인물 확실 (골격 및 이목구비 비례 일치)\n"
-            "   * 70 ~ 84점: 동일 인물 유력 (일부 각도/표정 차이 외 일치)\n"
-            "   * 50 ~ 69점: 동일인 가능성 낮음 (유사한 인상이나 세부 골격 상이)\n"
-            "   * 0 ~ 49점: 서로 다른 인물 (골격 또는 성별 상이)\n"
+            "- 성별, 안면 영구 골격 비율, 귀 모양, 눈코입의 절대적 비례를 정밀 분석합니다.\n"
+            "- 헤어스타일, 안경, 메이크업의 일시적 변화에 속지 말고 본질적 골격 구조만 비교하세요.\n"
+            "- 기준: 동일 인물이면 85~100점, 일부 표정 차이 유력은 70~84점, 다른 인물이면 10~35점.\n"
         )
-        verdict_options = "동일 인물 확실 | 동일 인물 유력 | 동일인 가능성 낮음 | 다른 인물"
     elif mode == "celebrity":
         mode_title = "닮은꼴 싱크로율 (연예인·친구 닮은꼴 측정)"
         mode_instruction = (
-            "【분석 모드: 닮은꼴 싱크로율 (연예인·친구 닮은꼴 측정)】\n"
-            "목적: 서로 다른 두 사람(예: 나와 연예인, 친구 간)의 생김새와 인상이 얼마나 닮았는지 닮은꼴 싱크로율을 측정합니다.\n"
+            "【분석 모드: 닮은꼴 싱크로율 (친구·연예인 닮은꼴 측정)】\n"
+            "목적: 서로 다른 두 사람의 생김새와 인상이 얼마나 닮았는지 닮은꼴 싱크로율을 냉정하게 측정합니다.\n"
             "판정 가이드라인:\n"
-            "- 헤어스타일이나 메이크업, 표정에 속지 않고 눈매, 콧날, 입꼬리, 얼굴형의 형태적 닮음도를 평가하세요.\n"
-            "- 점수 기준 (0~100점):\n"
-            "   * 85 ~ 100점: 도플갱어 수준 (거의 쌍둥이처럼 닮음)\n"
-            "   * 70 ~ 84점: 매우 높은 닮은꼴 (한눈에 알아볼 만큼 닮음)\n"
-            "   * 50 ~ 69점: 분위기 닮은꼴 (특정 이목구비 및 전체적 인상 유사)\n"
-            "   * 35 ~ 49점: 부분적 닮음 (특정 포인트 하나만 유사)\n"
-            "   * 0 ~ 34점: 서로 다른 생김새 (닮은 구석 적음)\n"
+            "- 안경 착용, 헤어스타일, 옷차림, 단순히 둘 다 웃고 있다는 표정 연출에 속지 마세요!\n"
+            "- 전혀 닮지 않은 타인/남남은 15~35점의 '서로 다른 생김새' 점수를 단호하게 부여하세요.\n"
+            "- 특정 이목구비 하나만 얼핏 닮았으면 45~60점, 한눈에 알아볼 만큼 닮았으면 70~85점, 도플갱어 수준이면 86~98점을 부여하세요.\n"
         )
-        verdict_options = "도플갱어 수준(판박이) | 매우 높은 닮은꼴 | 분위기 닮은꼴 | 부분적 닮음 | 서로 다른 생김새"
     else:  # default: family
         mode_title = "가족·붕어빵 닮음도 분석 (부자/모자/형제자매)"
         mode_instruction = (
             "【분석 모드: 가족·붕어빵 닮음도 분석 (아빠-아들, 엄마-아들/딸, 형제·자매 등)】\n"
-            "목적: 두 사람 간의 유전적 생김새 닮음도(붕어빵 지수)를 정밀 측정합니다.\n"
-            "★ 매우 중요: 절대로 범죄 수사처럼 '동일한 사람인가?'를 따지는 것이 아닙니다. 가족 간에 얼마나 이목구비가 쏙 빼닮았는지를 측정하는 것입니다.\n\n"
-            "★★★★★ 엄격한 채점 가이드라인 (반드시 준수) ★★★★★\n"
-            "1. [나이 및 주름 차이 보정 (감점 절대 금지)]:\n"
-            "   - 아빠와 아들은 당연히 20~30세의 나이 차이가 존재합니다.\n"
-            "   - 아빠의 주름, 연륜, 피부결, 흰머리, 수염 등 노화 현상으로 인해 점수를 깎으면 절대 안 됩니다!\n"
-            "   - 아들이 나이 들었을 때 아빠의 모습이 연상되거나, 이목구비(눈매, 콧날, 웃는 입모양, 턱선)가 같은 유전자임을 보여준다면 85~95점의 '완벽한 붕어빵/매우 높은 닮음' 점수를 부여하세요.\n"
-            "2. [성별 차이 보정 (감점 절대 금지)]:\n"
-            "   - 엄마(여성)와 아들(남성), 누나와 남동생처럼 성별이 달라도 감점하지 마세요!\n"
-            "   - 남녀에 따른 헤어스타일, 화장, 수염 유무 등 성별 외형을 배제하고, 눈의 가로세로 비율, 쌍꺼풀 라인, 콧망울 너비, 인중 길이, 웃을 때의 입꼬리 등 순수 이목구비의 유전적 닮음을 비교하세요.\n"
-            "3. [닮은꼴·붕어빵 점수 기준 (0~100점)]:\n"
-            "   * 85 ~ 100점: '완벽한 붕어빵 (판박이)' - 눈매, 콧대, 웃는 인상, 턱선이 쏙 빼닮음\n"
-            "   * 70 ~ 84점: '매우 높은 붕어빵 지수' - 한눈에 가족임을 알아볼 만큼 핵심 이목구비가 뚜렷하게 닮음\n"
-            "   * 50 ~ 69점: '상당한 유전적 닮음' - 얼굴 윤곽이나 특정 이목구비, 미소가 상당 부분 일치\n"
-            "   * 35 ~ 49점: '은근한 닮음' - 특정 부위 하나만 살짝 닮고 전반적인 인상은 차이가 큼\n"
-            "   * 0 ~ 34점: '서로 다른 생김새' - 골격과 이목구비 전반에 걸쳐 닮은 특징이 거의 없음\n"
+            "목적: 두 사람 간의 유전적 생김새 닮음도(붕어빵 지수)를 과학적이고 객관적으로 측정합니다.\n\n"
+            "★★★★★ [판정 및 채점 가이드라인 - 핵심 원칙] ★★★★★\n"
+            "1. [외적 연출 배제 (절대 속지 마십시오)]:\n"
+            "   - 안경 착용 여부, 비슷한 헤어스타일, 옷차림, 단순히 둘 다 웃고 있다는 표정에 속지 마십시오.\n"
+            "   - 안경을 둘 다 썼거나 둘 다 웃는다고 해서 닮은 것이 아닙니다. 오직 얼굴 골격과 이목구비 자체의 순수 형태만 대조하십시오.\n\n"
+            "2. [전혀 다른 남남에 대한 단호한 감점 (맹목적 고득점 절대 금지)]:\n"
+            "   - 두 사람이 유전적 연관이 없는 타인/남남인 경우:\n"
+            "   - 억지로 공통점을 지어내어 60~80점 이상의 높은 점수를 주어서는 절대 안 됩니다!\n"
+            "   - 턱선, 눈매, 코 모양, 입술 등 이목구비 형태가 상이하다면 가차 없이 15점 ~ 38점 사이의 '서로 다른 생김새' 점수를 부여하십시오!\n\n"
+            "3. [실제 붕어빵 가족에 대한 정당한 점수 부여]:\n"
+            "   - 부모와 자식 간 20~30년의 나이 차이로 인한 자연스러운 노화(주름, 피부 처짐, 흰머리)는 감점 요인이 아닙니다.\n"
+            "   - 엄마-아들처럼 성별이 달라도, 엄마의 선한 눈매와 웃는 입매를 아들이 그대로 물려받았는지를 확인하십시오.\n"
+            "   - 주름을 지우고 타고난 이목구비(쌍꺼풀 라인, 콧날 각도, 미소 시 입꼬리 굴곡, 턱 끝 형태)가 쏙 빼닮았다면 75점 ~ 90점의 높은 붕어빵 점수를 부여하십시오.\n\n"
+            "4. [5개 부위별 엄격한 채점 기준 (각 0~100점)]:\n"
+            "   - eyes (눈매): 쌍꺼풀 라인, 눈의 가로세로 비례, 눈꼬리 각도, 눈웃음 모양\n"
+            "     (붕어빵: 75~95점 | 부분 유사: 45~65점 | 남남: 15~35점)\n"
+            "   - nose (콧대/콧볼): 콧대 높이, 콧볼 너비(복코 vs 날렵한 코), 코끝 형태\n"
+            "     (붕어빵: 75~95점 | 부분 유사: 45~65점 | 남남: 15~35점)\n"
+            "   - mouth (입술/미소): 웃을 때 입꼬리 굴곡, 치아 노출, 입술 두께와 하관 인상\n"
+            "     (붕어빵: 75~95점 | 부분 유사: 45~65점 | 남남: 15~35점)\n"
+            "   - face_shape (얼굴형): 턱끝 형태, 하악각 윤곽선\n"
+            "     (붕어빵: 70~90점 | 부분 유사: 45~65점 | 남남: 15~35점)\n"
+            "   - features (고유 인상): 이목구비 상대적 배치 비율 및 유전적 싱크로율\n"
+            "     (붕어빵: 75~95점 | 부분 유사: 45~65점 | 남남: 15~35점)\n"
         )
-        verdict_options = "완벽한 붕어빵(판박이) | 매우 높은 닮음 | 뚜렷한 닮은꼴 | 은근한 닮음 | 서로 다른 생김새"
 
     system_instruction = (
         f"{mode_instruction}\n\n"
-        "당신은 인물 생김새 분석 및 안면 특징 정밀 감정 전문 AI입니다.\n"
-        "제시된 [사진 1]과 [사진 2]의 인물 얼굴을 세밀하게 관찰하고, 두 사람이 얼마나 쏙 빼닮았는지 분석하여 결과를 제시하세요.\n\n"
-        "대조 관찰 부위:\n"
-        "- 얼굴형: 턱선(하악각, V라인/각진형/둥근형), 광대뼈 위치, 이마와 턱의 삼분 비율\n"
-        "- 눈매: 눈의 가로/세로 비율, 쌍꺼풀 유무 및 형태, 눈꼬리 각도, 웃을 때 접히는 눈웃음 라인\n"
-        "- 콧대: 콧대의 높이와 시작점, 콧볼(비익) 너비, 코끝의 둥글거나 날렵한 형태\n"
-        "- 입술 & 하관: 입술 두께, 입꼬리 방향, 인중 길이, 웃을 때 치아 노출 및 입매 모양\n"
-        "- 고유 인상: 전체적으로 풍기는 분위기, 표정 짓는 습관, 붕어빵 싱크로율\n\n"
         "반드시 다음 JSON 스키마 형식으로만 출력하세요 (마크다운 코드블록이나 서두/결말 문장 없이 순수한 JSON 문자열만 출력):\n"
         "{\n"
-        '  "similarity_score": <0부터 100 사이의 정수 (닮음도 점수)>,\n'
-        f'  "verdict": "<{verdict_options} 중 적합한 것 택1>",\n'
-        '  "verdict_summary": "<두 사람의 닮은 정도와 핵심 붕어빵 포인트를 짚어주는 자연스러운 한국어 요약 한 문장 (예: 아빠의 선한 눈매와 웃을 때의 시원한 입매를 쏙 빼닮은 붕어빵 부자입니다.)>",\n'
         '  "detailed_scores": {\n'
-        '    "face_shape": <얼굴형 및 턱선 닮음도 0-100>,\n'
-        '    "eyes": <눈매 및 눈웃음 닮음도 0-100>,\n'
-        '    "nose": <콧대 및 코끝 닮음도 0-100>,\n'
-        '    "mouth": <입술 및 미소/하관 닮음도 0-100>,\n'
-        '    "features": <고유 인상 및 붕어빵 분위기 닮음도 0-100>\n'
+        '    "eyes": <눈매 점수 0-100>,\n'
+        '    "nose": <콧대 점수 0-100>,\n'
+        '    "mouth": <입술 점수 0-100>,\n'
+        '    "face_shape": <얼굴형 점수 0-100>,\n'
+        '    "features": <고유 인상 점수 0-100>\n'
         '  },\n'
+        '  "similarity_score": <부위별 점수를 종합한 정수 0-100>,\n'
+        '  "verdict_summary": "<두 사람의 닮음 정도를 친절하고 명확하게 설명하는 한 문장>",\n'
         '  "similarities": [\n'
-        '    "<가장 쏙 빼닮은 특징 1 (부위와 형태 상세 기술)>",\n'
-        '    "<가장 쏙 빼닮은 특징 2 (부위와 형태 상세 기술)>",\n'
-        '    "<가장 쏙 빼닮은 특징 3 (부위와 형태 상세 기술)>"\n'
+        '    "<실제 관찰된 구체적 붕어빵 포인트 1~2개>"\n'
         '  ],\n'
         '  "differences": [\n'
-        '    "<서로 구별되는 개성적 차이점 1 (나이/성별 외의 형태적 차이)>",\n'
-        '    "<서로 구별되는 개성적 차이점 2>"\n'
+        '    "<명백하게 다른 부위별 형태 차이점 1~2개>"\n'
         '  ],\n'
-        '  "environmental_factors": "<연령대, 성별, 촬영 각도, 표정 등 분석 시 보정하여 감안한 외적 차이점>",\n'
-        '  "comprehensive_analysis": "<두 사람의 이목구비와 얼굴 전체가 어디가 어떻게 닮았는지 유전적 특징과 붕어빵 포인트를 친절하고 흥미롭게 설명하는 종합 감정 소견 (3~5문장)>"\n'
+        '  "environmental_factors": "<나이, 성별, 표정, 안경 등 감안하거나 배제한 요소>",\n'
+        '  "comprehensive_analysis": "<종합 분석 소견 2~3문장>"\n'
         "}"
     )
 
@@ -522,7 +564,7 @@ async def execute_face_comparison(img1_url: str, img2_url: str, mode: str = "fam
     payload = {
         "model": MODEL_NAME,
         "messages": messages,
-        "temperature": 0.1,
+        "temperature": 0.05,
         "max_tokens": 1500,
         "stream": False
     }
@@ -551,13 +593,35 @@ async def execute_face_comparison(img1_url: str, img2_url: str, mode: str = "fam
             content_text = choices[0].get("message", {}).get("content", "")
             parsed_analysis = extract_json_from_response(content_text)
 
+            # Extract raw scores
+            det = parsed_analysis.get("detailed_scores", {})
+            eyes_raw = float(det.get("eyes", 40))
+            nose_raw = float(det.get("nose", 40))
+            mouth_raw = float(det.get("mouth", 40))
+            face_raw = float(det.get("face_shape", 40))
+            feat_raw = float(det.get("features", 40))
+
+            # 1. Calibrate each detailed score into human-perceived scale
+            cal_det = {
+                "eyes": calibrate_similarity_score(eyes_raw),
+                "nose": calibrate_similarity_score(nose_raw),
+                "mouth": calibrate_similarity_score(mouth_raw),
+                "face_shape": calibrate_similarity_score(face_raw),
+                "features": calibrate_similarity_score(feat_raw),
+            }
+            parsed_analysis["detailed_scores"] = cal_det
+
+            # 2. Calibrate overall similarity score
+            raw_llm = float(parsed_analysis.get("similarity_score", 40))
+            raw_weighted = (eyes_raw * 0.25 + nose_raw * 0.20 + mouth_raw * 0.20 + face_raw * 0.20 + feat_raw * 0.15)
+            combined_raw = 0.4 * raw_llm + 0.6 * raw_weighted
+
+            final_score = calibrate_similarity_score(combined_raw)
+            parsed_analysis["similarity_score"] = final_score
+            parsed_analysis["verdict"] = get_verdict_for_score(final_score, mode)
+
             # Ensure all required keys exist
-            parsed_analysis.setdefault("similarity_score", 50)
-            parsed_analysis.setdefault("verdict", "판정 완료")
             parsed_analysis.setdefault("verdict_summary", "분석이 완료되었습니다.")
-            parsed_analysis.setdefault("detailed_scores", {
-                "face_shape": 50, "eyes": 50, "nose": 50, "mouth": 50, "features": 50
-            })
             parsed_analysis.setdefault("similarities", [])
             parsed_analysis.setdefault("differences", [])
             parsed_analysis.setdefault("environmental_factors", "특이사항 없음")
