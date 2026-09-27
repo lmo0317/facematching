@@ -13,6 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image, ImageOps
 import httpx
+import cv2
+import numpy as np
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -41,13 +43,133 @@ app.add_middleware(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 SAMPLES_DIR = os.path.join(STATIC_DIR, "samples")
+MODELS_DIR = os.path.join(BASE_DIR, "models")
 
 os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(SAMPLES_DIR, exist_ok=True)
+os.makedirs(MODELS_DIR, exist_ok=True)
+
+YUNET_MODEL_PATH = os.path.join(MODELS_DIR, "face_detection_yunet.onnx")
 
 # Mount static folder (supports both /static and /facematching/static)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/facematching/static", StaticFiles(directory=STATIC_DIR), name="static_facematching")
+
+
+def detect_faces_in_image(image_bytes: bytes) -> List[Dict[str, Any]]:
+    """Detect faces using YuNet (or Haar Cascade fallback) and return coordinates + thumbnails."""
+    try:
+        img_pil = Image.open(io.BytesIO(image_bytes))
+        img_pil = ImageOps.exif_transpose(img_pil)
+        if img_pil.mode != "RGB":
+            img_pil = img_pil.convert("RGB")
+
+        w, h = img_pil.size
+        img_np = np.array(img_pil)
+        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+
+        faces = None
+        if os.path.exists(YUNET_MODEL_PATH):
+            try:
+                detector = cv2.FaceDetectorYN.create(
+                    model=YUNET_MODEL_PATH,
+                    config="",
+                    input_size=(w, h),
+                    score_threshold=0.55,
+                    nms_threshold=0.3,
+                    top_k=50
+                )
+                detector.setInputSize((w, h))
+                _, faces = detector.detect(img_bgr)
+            except Exception as e:
+                logger.warning(f"YuNet detection warning: {e}")
+                faces = None
+
+        detected = []
+        if faces is not None and len(faces) > 0:
+            sorted_faces = sorted(faces, key=lambda x: x[0])
+            count = len(sorted_faces)
+            for i, f in enumerate(sorted_faces):
+                fx, fy, fw, fh = map(int, f[0:4])
+                score = float(f[-1])
+
+                pad_x = int(fw * 0.35)
+                pad_top = int(fh * 0.45)
+                pad_bottom = int(fh * 0.35)
+
+                px1 = max(0, fx - pad_x)
+                py1 = max(0, fy - pad_top)
+                px2 = min(w, fx + fw + pad_x)
+                py2 = min(h, fy + fh + pad_bottom)
+                pw = px2 - px1
+                ph = py2 - py1
+
+                thumb = img_pil.crop((px1, py1, px2, py2))
+                thumb = thumb.resize((80, 80), Image.Resampling.LANCZOS)
+                buf = io.BytesIO()
+                thumb.save(buf, format="JPEG", quality=85)
+                thumb_b64 = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+
+                if count == 1:
+                    label = "인물 1"
+                elif count == 2:
+                    label = "인물 1 (왼쪽)" if i == 0 else "인물 2 (오른쪽)"
+                elif count == 3:
+                    pos = ["왼쪽", "중앙", "오른쪽"][i]
+                    label = f"인물 {i+1} ({pos})"
+                else:
+                    label = f"인물 {i+1}"
+
+                detected.append({
+                    "id": i + 1,
+                    "label": label,
+                    "box": {"x": fx, "y": fy, "width": fw, "height": fh},
+                    "padded_box": {"x": px1, "y": py1, "width": pw, "height": ph},
+                    "confidence": round(score, 2),
+                    "thumbnail": thumb_b64
+                })
+        else:
+            # Fallback to Haar Cascade
+            try:
+                cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+                face_cascade = cv2.CascadeClassifier(cascade_path)
+                gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+                haar_faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+                if len(haar_faces) > 0:
+                    sorted_faces = sorted(haar_faces, key=lambda x: x[0])
+                    for i, (fx, fy, fw, fh) in enumerate(sorted_faces):
+                        pad_x = int(fw * 0.35)
+                        pad_top = int(fh * 0.45)
+                        pad_bottom = int(fh * 0.35)
+
+                        px1 = max(0, fx - pad_x)
+                        py1 = max(0, fy - pad_top)
+                        px2 = min(w, fx + fw + pad_x)
+                        py2 = min(h, fy + fh + pad_bottom)
+                        pw = px2 - px1
+                        ph = py2 - py1
+
+                        thumb = img_pil.crop((px1, py1, px2, py2))
+                        thumb = thumb.resize((80, 80), Image.Resampling.LANCZOS)
+                        buf = io.BytesIO()
+                        thumb.save(buf, format="JPEG", quality=85)
+                        thumb_b64 = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+
+                        detected.append({
+                            "id": i + 1,
+                            "label": f"인물 {i+1}",
+                            "box": {"x": int(fx), "y": int(fy), "width": int(fw), "height": int(fh)},
+                            "padded_box": {"x": px1, "y": py1, "width": pw, "height": ph},
+                            "confidence": 0.85,
+                            "thumbnail": thumb_b64
+                        })
+            except Exception as e:
+                logger.warning(f"Haar Cascade fallback warning: {e}")
+
+        return detected
+    except Exception as e:
+        logger.error(f"Face detection error: {e}", exc_info=True)
+        return []
 
 
 def process_image_to_base64(image_bytes: bytes, max_dim: int = 768) -> str:
@@ -128,6 +250,10 @@ class CompareJsonRequest(BaseModel):
     image1_base64: str
     image2_base64: str
     mode: Optional[str] = "family"
+
+
+class DetectFacesRequest(BaseModel):
+    image_base64: str
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -213,9 +339,39 @@ async def get_samples():
             "mode": "family",
             "img1": "/static/samples/sample2_a.jpg",
             "img2": "/static/samples/sample2_b.jpg"
+        },
+        {
+            "id": "pair4",
+            "title": "예제 4 (단체 사진 인물 선택 - 3인 가족 중 아들 vs 엄마)",
+            "description": "3인 가족 단체 사진에서 원하는 인물을 클릭하여 맞춘 뒤 붕어빵 대조",
+            "expected": "완벽한 붕어빵 (80% 이상)",
+            "mode": "family",
+            "img1": "/static/samples/sample_family_group.jpg",
+            "img2": "/static/samples/sample_mother.jpg"
         }
     ]
     return {"samples": sample_pairs}
+
+
+@app.post("/api/detect-faces")
+@app.post("/facematching/api/detect-faces")
+async def detect_faces_endpoint(req: DetectFacesRequest):
+    """Detect human faces in image, returning bounding boxes, labels, and thumbnails."""
+    data = req.image_base64
+    if "," in data:
+        data = data.split(",", 1)[1]
+
+    try:
+        image_bytes = base64.b64decode(data)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="유효한 Base64 이미지가 아닙니다.")
+
+    faces = detect_faces_in_image(image_bytes)
+    return {
+        "success": True,
+        "count": len(faces),
+        "faces": faces
+    }
 
 
 @app.post("/api/compare")

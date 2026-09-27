@@ -10,6 +10,9 @@ let webcamStream = null;
 let currentSamplePresets = [];
 let currentAnalysisResult = null;
 let currentMode = 'family'; // 'family' | 'celebrity' | 'identical'
+let detectedFaces1 = []; // detected faces in photo 1
+let detectedFaces2 = []; // detected faces in photo 2
+let activeFaceIndex = null;
 
 function setAnalysisMode(mode) {
   currentMode = mode;
@@ -269,6 +272,9 @@ async function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
       : `${filename} (${sizeInKb} KB)`;
     document.getElementById(`file-info-${targetId}`).textContent = infoText;
 
+    // Trigger face detection in background
+    detectFaces(targetId, dataUrl);
+
     updateCompareButtonState();
     lucide.createIcons();
   } catch (err) {
@@ -293,6 +299,10 @@ async function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
       document.getElementById(`btn-restore-${targetId}`)?.classList.add('hidden');
       document.getElementById(`badge-crop-${targetId}`)?.classList.add('hidden');
       document.getElementById(`file-info-${targetId}`).textContent = `${filename} (${Math.round(blob.size / 1024)} KB)`;
+      
+      // Trigger face detection in background
+      detectFaces(targetId, dataUrl);
+      
       updateCompareButtonState();
       lucide.createIcons();
     };
@@ -304,10 +314,12 @@ function clearPhoto(targetId) {
   if (targetId === 1) {
     photo1Data = null;
     photo1OriginalData = null;
+    detectedFaces1 = [];
   }
   if (targetId === 2) {
     photo2Data = null;
     photo2OriginalData = null;
+    detectedFaces2 = [];
   }
 
   document.getElementById(`empty-state-${targetId}`).classList.remove('hidden');
@@ -317,10 +329,44 @@ function clearPhoto(targetId) {
   document.getElementById(`btn-crop-${targetId}`)?.classList.add('hidden');
   document.getElementById(`btn-restore-${targetId}`)?.classList.add('hidden');
   document.getElementById(`badge-crop-${targetId}`)?.classList.add('hidden');
+  document.getElementById(`face-detect-pill-${targetId}`)?.classList.add('hidden');
   document.getElementById(`file-info-${targetId}`).textContent = '선택된 파일 없음';
   document.getElementById(`file-input-${targetId}`).value = '';
 
   updateCompareButtonState();
+}
+
+// --- Face Detection API Client ---
+async function detectFaces(targetId, dataUrl) {
+  try {
+    const pill = document.getElementById(`face-detect-pill-${targetId}`);
+    const countEl = document.getElementById(`face-detect-count-${targetId}`);
+
+    const res = await fetch(BASE_URL + '/api/detect-faces', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_base64: dataUrl })
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const faces = data.faces || [];
+    if (targetId === 1) detectedFaces1 = faces;
+    if (targetId === 2) detectedFaces2 = faces;
+
+    if (faces.length > 0 && pill && countEl) {
+      pill.classList.remove('hidden');
+      countEl.textContent = `${faces.length}명의 인물 얼굴 감지됨`;
+      lucide.createIcons();
+    } else if (pill) {
+      pill.classList.add('hidden');
+    }
+
+    if (activeCropperTarget === targetId) {
+      renderDetectedFacesBar(targetId);
+    }
+  } catch (err) {
+    console.warn('Face detection error:', err);
+  }
 }
 
 // --- Cropper.js Modal & Controls ---
@@ -354,9 +400,97 @@ function openCropper(targetId) {
       cropBoxMovable: true,
       cropBoxResizable: true,
       toggleDragModeOnDblclick: false,
+      ready() {
+        renderDetectedFacesBar(targetId);
+      }
     });
     setCropRatio(NaN);
   };
+
+  modal.classList.remove('hidden');
+  modal.classList.add('flex');
+
+  if (cropImg.src === originalData && cropImg.complete) {
+    initCropper();
+  } else {
+    cropImg.onload = () => {
+      cropImg.onload = null;
+      initCropper();
+    };
+    cropImg.src = originalData;
+  }
+
+  lucide.createIcons();
+}
+
+function renderDetectedFacesBar(targetId) {
+  const faces = targetId === 1 ? detectedFaces1 : detectedFaces2;
+  const bar = document.getElementById('crop-faces-bar');
+  const title = document.getElementById('crop-faces-title');
+  const chipsContainer = document.getElementById('crop-faces-chips');
+
+  if (!bar || !chipsContainer) return;
+
+  if (!faces || faces.length === 0) {
+    bar.classList.add('hidden');
+    return;
+  }
+
+  bar.classList.remove('hidden');
+  if (title) {
+    title.textContent = `감지된 인물 (${faces.length}명)`;
+  }
+  chipsContainer.innerHTML = '';
+  activeFaceIndex = null;
+
+  faces.forEach((face, idx) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = `face-chip-${idx}`;
+    btn.className = 'face-chip flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/50 transition cursor-pointer text-xs group';
+    btn.innerHTML = `
+      <img src="${face.thumbnail}" class="w-6 h-6 rounded-full object-cover border border-white/20">
+      <span class="font-medium text-slate-200 group-hover:text-white">${face.label}</span>
+      <span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">맞춤</span>
+    `;
+    btn.onclick = () => selectDetectedFace(idx, targetId);
+    chipsContainer.appendChild(btn);
+  });
+
+  // If faces exist, auto-fit to the first face
+  if (faces.length > 0) {
+    selectDetectedFace(0, targetId);
+  }
+}
+
+function selectDetectedFace(index, targetId) {
+  const faces = targetId === 1 ? detectedFaces1 : detectedFaces2;
+  if (!faces || !faces[index] || !cropperInstance) return;
+
+  activeFaceIndex = index;
+  const face = faces[index];
+
+  // Highlight active chip
+  faces.forEach((_, i) => {
+    const chip = document.getElementById(`face-chip-${i}`);
+    if (chip) {
+      if (i === index) {
+        chip.className = 'face-chip flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-indigo-600/40 border-2 border-indigo-500 shadow-md shadow-indigo-600/40 text-white text-xs cursor-pointer';
+      } else {
+        chip.className = 'face-chip flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/50 transition cursor-pointer text-xs group';
+      }
+    }
+  });
+
+  // Fit Cropper.js box to detected face (padded coordinates)
+  const box = face.padded_box;
+  cropperInstance.setData({
+    x: box.x,
+    y: box.y,
+    width: box.width,
+    height: box.height
+  });
+}
 
   modal.classList.remove('hidden');
   modal.classList.add('flex');
