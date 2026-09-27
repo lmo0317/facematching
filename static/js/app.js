@@ -135,10 +135,66 @@ function handleFile(file, targetId) {
   setPhotoFromBlob(file, targetId, file.name);
 }
 
-function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const dataUrl = e.target.result;
+// Client-side image compression to keep payload well under Nginx's 1MB limit
+async function compressImage(blob, maxDim = 800, initialQuality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(blob);
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      let { width, height } = img;
+      
+      // Calculate scaled dimensions
+      if (width > maxDim || height > maxDim) {
+        if (width > height) {
+          height = Math.round((height * maxDim) / width);
+          width = maxDim;
+        } else {
+          width = Math.round((width * maxDim) / height);
+          height = maxDim;
+        }
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+
+      let quality = initialQuality;
+      let dataUrl = canvas.toDataURL('image/jpeg', quality);
+      let base64Length = dataUrl.length - (dataUrl.indexOf(',') + 1);
+      let sizeInBytes = Math.round((base64Length * 3) / 4);
+
+      // If compressed size is still > 350KB, step down quality to guarantee < 350KB per photo
+      if (sizeInBytes > 350 * 1024) {
+        quality = 0.72;
+        dataUrl = canvas.toDataURL('image/jpeg', quality);
+        base64Length = dataUrl.length - (dataUrl.indexOf(',') + 1);
+        sizeInBytes = Math.round((base64Length * 3) / 4);
+      }
+
+      resolve({
+        dataUrl,
+        sizeInKb: Math.round(sizeInBytes / 1024),
+        width,
+        height
+      });
+    };
+    img.onerror = (err) => {
+      URL.revokeObjectURL(objectUrl);
+      reject(err);
+    };
+    img.src = objectUrl;
+  });
+}
+
+async function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
+  try {
+    const origSizeKb = Math.round(blob.size / 1024);
+    // Compress and scale image in browser canvas
+    const { dataUrl, sizeInKb, width, height } = await compressImage(blob, 800, 0.85);
+
     if (targetId === 1) photo1Data = dataUrl;
     if (targetId === 2) photo2Data = dataUrl;
 
@@ -151,12 +207,33 @@ function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
 
     // Show clear button
     document.getElementById(`btn-clear-${targetId}`).classList.remove('hidden');
-    document.getElementById(`file-info-${targetId}`).textContent = `${filename} (${Math.round(blob.size / 1024)} KB)`;
+    
+    // Display file name with optimization info
+    const infoText = origSizeKb > 500 
+      ? `${filename} (${width}×${height}, ${sizeInKb} KB / 원본: ${origSizeKb} KB 압축됨)`
+      : `${filename} (${sizeInKb} KB)`;
+    document.getElementById(`file-info-${targetId}`).textContent = infoText;
 
     updateCompareButtonState();
     lucide.createIcons();
-  };
-  reader.readAsDataURL(blob);
+  } catch (err) {
+    console.error('이미지 압축 실패:', err);
+    // Fallback: read directly if canvas fails
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target.result;
+      if (targetId === 1) photo1Data = dataUrl;
+      if (targetId === 2) photo2Data = dataUrl;
+      document.getElementById(`empty-state-${targetId}`).classList.add('hidden');
+      document.getElementById(`preview-container-${targetId}`).classList.remove('hidden');
+      document.getElementById(`preview-img-${targetId}`).src = dataUrl;
+      document.getElementById(`btn-clear-${targetId}`).classList.remove('hidden');
+      document.getElementById(`file-info-${targetId}`).textContent = `${filename} (${Math.round(blob.size / 1024)} KB)`;
+      updateCompareButtonState();
+      lucide.createIcons();
+    };
+    reader.readAsDataURL(blob);
+  }
 }
 
 function clearPhoto(targetId) {
@@ -309,6 +386,9 @@ async function startComparison() {
     clearInterval(progressTimer);
 
     if (!res.ok) {
+      if (res.status === 413) {
+        throw new Error('사진 파일 용량이 전송 제한을 초과했습니다. 자동으로 최적화되도록 사진을 다시 업로드해 주세요.');
+      }
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail || `서버 오류 (${res.status})`);
     }
