@@ -9,6 +9,28 @@ let activeWebcamTarget = null;
 let webcamStream = null;
 let currentSamplePresets = [];
 let currentAnalysisResult = null;
+let currentMode = 'family'; // 'family' | 'celebrity' | 'identical'
+
+function setAnalysisMode(mode) {
+  currentMode = mode;
+  const modes = ['family', 'celebrity', 'identical'];
+  modes.forEach(m => {
+    const btn = document.getElementById(`mode-${m}`);
+    if (!btn) return;
+    if (m === mode) {
+      btn.className = 'px-4 py-2 rounded-xl text-xs font-bold transition flex items-center space-x-1.5 bg-indigo-600 text-white shadow-md shadow-indigo-600/30';
+    } else {
+      btn.className = 'px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white transition flex items-center space-x-1.5';
+    }
+  });
+
+  const btnText = document.querySelector('#btn-compare span');
+  if (btnText) {
+    if (mode === 'family') btnText.textContent = '두 사람 얼마나 닮았나? 붕어빵 지수 측정';
+    else if (mode === 'celebrity') btnText.textContent = '두 사람 닮은꼴 싱크로율 측정';
+    else if (mode === 'identical') btnText.textContent = '두 사진 동일 인물 정밀 대조 시작';
+  }
+}
 
 // Dynamically detect base URL prefix (works at / or /facematching)
 function getBaseUrl() {
@@ -105,6 +127,10 @@ async function loadSamplePreset(index) {
     const res2 = await fetch(url2);
     const blob2 = await res2.blob();
     setPhotoFromBlob(blob2, 2, `${sample.id}_2.jpg`);
+
+    if (sample.mode) {
+      setAnalysisMode(sample.mode);
+    }
 
     // Scroll to action button smoothly
     setTimeout(() => {
@@ -595,7 +621,7 @@ async function startComparison() {
     const payload = {
       image1_base64: photo1Data,
       image2_base64: photo2Data,
-      mode: 'detailed'
+      mode: currentMode
     };
 
     const res = await fetch(BASE_URL + '/api/compare-json', {
@@ -694,9 +720,11 @@ function renderResults(data) {
 
   // Description text
   document.getElementById('verdict-desc').textContent = 
-    score >= 70 ? '두 사진은 이목구비의 상대적 거리 비율과 안면 골격 특징에서 매우 높은 일치도를 보입니다.'
-    : score >= 50 ? '일부 이목구비와 분위기에서 유사한 특징이 관찰되나 세부 골격 차이가 존재합니다.'
-    : '얼굴형 및 주요 이목구비의 골격 구조가 상이하여 서로 다른 인물로 판단됩니다.';
+    score >= 85 ? '눈매, 콧날, 웃는 모습과 얼굴형에서 감탄이 나올 만큼 높은 유전적 붕어빵 싱크로율을 보여줍니다.'
+    : score >= 70 ? '핵심 이목구비와 특유의 표정 습관이 매우 많이 닮아 한눈에 가족/닮은꼴임을 알 수 있습니다.'
+    : score >= 50 ? '전체적인 인상과 특정 이목구비에서 상당한 유사성이 관찰되는 닮은꼴입니다.'
+    : score >= 35 ? '일부 특정 부위에서 닮은 느낌이 있으나, 각자의 뚜렷한 개성이 더 돋보입니다.'
+    : '얼굴 골격과 이목구비 전반에 걸쳐 서로 다른 고유한 개성을 지니고 있습니다.';
 
   // Component Scores
   const updateBar = (id, val) => {
@@ -760,25 +788,28 @@ function copyReport() {
   if (!currentAnalysisResult) return;
 
   const r = currentAnalysisResult;
-  const reportText = `[FaceMatch AI - Gemma 4 E4B 안면 유사도 감정서]
+  const modeLabel = currentMode === 'family' ? '가족·붕어빵 닮음도' : currentMode === 'celebrity' ? '닮은꼴 싱크로율' : '동일 인물 정밀 대조';
+  const reportText = `[FaceMatch AI - Gemma 4 E4B 붕어빵·닮은꼴 정밀 감정서]
+- 분석 모드: ${modeLabel}
 - 일시: ${new Date().toLocaleString()}
-- 유사도 점수: ${r.similarity_score}%
-- 최종 판정: ${r.verdict} (${r.verdict_summary})
+- 닮은꼴·붕어빵 지수: ${r.similarity_score}%
+- 최종 판정: ${r.verdict}
+- 핵심 소견: ${r.verdict_summary}
 
-[세부 일치도]
-- 얼굴형 및 윤곽: ${r.detailed_scores?.face_shape || 0}%
-- 눈매 및 눈썹: ${r.detailed_scores?.eyes || 0}%
-- 콧대 및 비폭: ${r.detailed_scores?.nose || 0}%
-- 입술 및 인중: ${r.detailed_scores?.mouth || 0}%
-- 고유 생체 특징: ${r.detailed_scores?.features || 0}%
+[부위별 붕어빵 닮음도]
+- 얼굴형 & 턱선: ${r.detailed_scores?.face_shape || 0}%
+- 눈매 & 눈웃음: ${r.detailed_scores?.eyes || 0}%
+- 콧대 & 코끝: ${r.detailed_scores?.nose || 0}%
+- 입술 & 하관/미소: ${r.detailed_scores?.mouth || 0}%
+- 고유 인상 & 분위기: ${r.detailed_scores?.features || 0}%
 
-[주요 공통점]
+[쏙 빼닮은 붕어빵 포인트]
 ${(r.similarities || []).map(s => `- ${s}`).join('\n')}
 
-[주요 차이점]
+[각자의 개성적 포인트]
 ${(r.differences || []).map(d => `- ${d}`).join('\n')}
 
-[외적 환경 요인]
+[나이 및 성별 보정 요인]
 ${r.environmental_factors || '-'}
 
 [종합 감정 소견]
@@ -786,7 +817,7 @@ ${r.comprehensive_analysis || '-'}
 `;
 
   navigator.clipboard.writeText(reportText).then(() => {
-    alert('분석 결과 감정서가 클립보드에 복사되었습니다.');
+    alert('붕어빵 분석 결과 감정서가 클립보드에 복사되었습니다.');
   }).catch(() => {
     alert('클립보드 복사에 실패했습니다.');
   });

@@ -50,7 +50,7 @@
             <h1 class="text-lg font-bold bg-gradient-to-r from-white via-slate-200 to-indigo-300 bg-clip-text text-transparent">FaceMatch AI</h1>
             <span class="text-[11px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-semibold border border-indigo-500/30">Gemma 4 E4B</span>
           </div>
-          <p class="text-xs text-slate-400">사진 2장 인물 유사도 & 안면 생체 특징 정밀 감정</p>
+          <p class="text-xs text-slate-400">얼마나 닮았을까? 사진 2장 붕어빵 & 닮은꼴 정밀 대조</p>
         </div>
       </div>
 
@@ -77,11 +77,29 @@
     <!-- Hero / Description -->
     <div class="text-center mb-8">
       <h2 class="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-        두 장의 사진을 넣고 <span class="bg-gradient-to-r from-indigo-400 via-purple-300 to-pink-400 bg-clip-text text-transparent">얼마나 비슷한지</span> 확인하세요
+        두 사람이 <span class="bg-gradient-to-r from-indigo-400 via-purple-300 to-pink-400 bg-clip-text text-transparent">얼마나 닮았는지</span> 붕어빵 지수를 확인하세요
       </h2>
       <p class="text-sm text-slate-400 mt-2 max-w-2xl mx-auto">
-        112 서버에서 구동 중인 <span class="text-indigo-400 font-semibold">Gemma 4 E4B 비전 멀티모달 LLM</span>이 두 인물의 얼굴형, 눈매, 콧대, 입술 및 고유 골격 특징을 정밀 대조하여 유사도 점수와 감정 소견을 제공합니다.
+        아빠와 아들, 엄마와 딸·아들 가족 붕어빵부터 연예인 닮은꼴까지! 112 서버의 <span class="text-indigo-400 font-semibold">Gemma 4 E4B 비전 AI</span>가 나이(연령)와 성별 차이를 보정하여 타고난 유전적 이목구비 싱크로율을 정밀 분석합니다.
       </p>
+    </div>
+
+    <!-- Analysis Mode Selector -->
+    <div class="flex justify-center mb-6">
+      <div class="inline-flex p-1.5 rounded-2xl bg-slate-900/90 border border-white/10 shadow-lg gap-1">
+        <button id="mode-family" onclick="setAnalysisMode('family')" class="px-4 py-2 rounded-xl text-xs font-bold transition flex items-center space-x-1.5 bg-indigo-600 text-white shadow-md shadow-indigo-600/30">
+          <i data-lucide="users" class="w-3.5 h-3.5"></i>
+          <span>👨‍👩‍👧‍👦 가족·붕어빵 닮음 (기본)</span>
+        </button>
+        <button id="mode-celebrity" onclick="setAnalysisMode('celebrity')" class="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white transition flex items-center space-x-1.5">
+          <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
+          <span>✨ 닮은꼴 싱크로율 (친구/연예인)</span>
+        </button>
+        <button id="mode-identical" onclick="setAnalysisMode('identical')" class="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white transition flex items-center space-x-1.5">
+          <i data-lucide="scan-face" class="w-3.5 h-3.5"></i>
+          <span>🔍 동일 인물 정밀 대조</span>
+        </button>
+      </div>
     </div>
 
     <!-- Quick Sample Presets -->
@@ -94,15 +112,15 @@
         <div class="flex flex-wrap gap-2 justify-center" id="sample-buttons">
           <button onclick="loadSamplePreset(0)" class="px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/50 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5">
             <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-            <span>예제 1 (동일 인물 - 각도/조명)</span>
+            <span>예제 1 (부자 붕어빵 - 아빠 & 아들)</span>
           </button>
           <button onclick="loadSamplePreset(1)" class="px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/50 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5">
-            <span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span>
-            <span>예제 2 (다른 인물 - 남성 A vs B)</span>
+            <span class="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
+            <span>예제 2 (모자 붕어빵 - 엄마 & 아들)</span>
           </button>
           <button onclick="loadSamplePreset(2)" class="px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/50 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5">
-            <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-            <span>예제 3 (다른 인물 - 안경 남녀 대조)</span>
+            <span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span>
+            <span>예제 3 (서로 다른 생김새 - 남남 비교)</span>
           </button>
         </div>
       </div>
@@ -116,7 +134,7 @@
         <div class="flex items-center justify-between mb-3">
           <div class="flex items-center space-x-2">
             <span class="flex items-center justify-center w-6 h-6 rounded-full bg-indigo-600 text-white text-xs font-bold">1</span>
-            <h3 class="font-bold text-sm text-slate-200">사진 1 (기준 인물 사진)</h3>
+            <h3 class="font-bold text-sm text-slate-200">사진 1 (예: 아빠 / 엄마 / 본인)</h3>
           </div>
           <div class="flex items-center space-x-1.5">
             <button id="btn-crop-1" onclick="openCropper(1)" class="hidden text-xs bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 px-2.5 py-1 rounded-lg transition flex items-center space-x-1" title="여러 명 중 특정 얼굴 또는 원하는 영역만 선택하여 자르기">
@@ -182,7 +200,7 @@
         <div class="flex items-center justify-between mb-3">
           <div class="flex items-center space-x-2">
             <span class="flex items-center justify-center w-6 h-6 rounded-full bg-purple-600 text-white text-xs font-bold">2</span>
-            <h3 class="font-bold text-sm text-slate-200">사진 2 (비교 인물 사진)</h3>
+            <h3 class="font-bold text-sm text-slate-200">사진 2 (예: 아들 / 딸 / 비교 인물)</h3>
           </div>
           <div class="flex items-center space-x-1.5">
             <button id="btn-crop-2" onclick="openCropper(2)" class="hidden text-xs bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 px-2.5 py-1 rounded-lg transition flex items-center space-x-1" title="여러 명 중 특정 얼굴 또는 원하는 영역만 선택하여 자르기">
@@ -249,10 +267,10 @@
     <div class="flex flex-col items-center justify-center mb-12">
       <button id="btn-compare" onclick="startComparison()" disabled
               class="px-8 py-4 rounded-2xl bg-gradient-to-r from-indigo-600 via-indigo-500 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold text-base shadow-xl shadow-indigo-600/30 transition duration-200 flex items-center space-x-3 active:scale-95">
-        <i data-lucide="scan" class="w-5 h-5"></i>
-        <span>두 사진 정밀 유사도 대조 시작</span>
+        <i data-lucide="scan-face" class="w-5 h-5"></i>
+        <span>두 사람 얼마나 닮았나? 붕어빵 지수 측정</span>
       </button>
-      <p id="compare-hint" class="text-xs text-slate-400 mt-2">두 사진을 모두 등록하면 분석 버튼이 활성화됩니다.</p>
+      <p id="compare-hint" class="text-xs text-slate-400 mt-2">두 사진을 모두 등록하면 붕어빵 분석 버튼이 활성화됩니다.</p>
     </div>
 
     <!-- Loading / Scanning Indicator -->
@@ -263,8 +281,8 @@
           <i data-lucide="sparkles" class="w-8 h-8 text-indigo-400"></i>
         </div>
       </div>
-      <h3 class="text-lg font-bold text-white mb-2" id="loading-title">Gemma 4 E4B 비전 모델 분석 중...</h3>
-      <p class="text-xs text-indigo-300 mb-4" id="loading-step">1단계: 사진 최적화 및 안면 영역 인코딩</p>
+      <h3 class="text-lg font-bold text-white mb-2" id="loading-title">Gemma 4 E4B 비전 모델 붕어빵 싱크로율 분석 중...</h3>
+      <p class="text-xs text-indigo-300 mb-4" id="loading-step">1단계: 사진 최적화 및 유전적 안면 골격 인코딩</p>
       
       <!-- Progress Bar -->
       <div class="w-full bg-slate-800 rounded-full h-2 overflow-hidden mb-2">
@@ -290,7 +308,7 @@
               </svg>
               <div class="absolute inset-0 flex flex-col items-center justify-center">
                 <span id="score-value" class="text-3xl sm:text-4xl font-black text-white">0%</span>
-                <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">유사도 점수</span>
+                <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">닮은꼴·붕어빵 지수</span>
               </div>
             </div>
 
@@ -326,68 +344,68 @@
       <div class="glass-card rounded-2xl p-6">
         <h4 class="text-sm font-bold text-slate-200 mb-4 flex items-center space-x-2">
           <i data-lucide="layers" class="w-4 h-4 text-indigo-400"></i>
-          <span>부위별 정밀 세부 일치도</span>
+          <span>부위별 붕어빵 닮음도 분석</span>
         </h4>
 
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
           <!-- Face Shape -->
           <div class="bg-slate-900/60 rounded-xl p-4 border border-white/5">
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-slate-400 font-medium">얼굴형 및 윤곽</span>
+              <span class="text-xs text-slate-400 font-medium">얼굴형 & 턱선 닮음</span>
               <span id="score-face-shape" class="text-xs font-bold text-indigo-400">0%</span>
             </div>
             <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mb-2">
               <div id="bar-face-shape" class="bg-indigo-500 h-1.5 rounded-full transition-all duration-1000 w-0"></div>
             </div>
-            <p class="text-[11px] text-slate-500">하악각, 이마, 광대 곡률</p>
+            <p class="text-[11px] text-slate-500">턱 끝 라인, 광대뼈, 안면 비율</p>
           </div>
 
           <!-- Eyes -->
           <div class="bg-slate-900/60 rounded-xl p-4 border border-white/5">
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-slate-400 font-medium">눈매 및 눈썹</span>
+              <span class="text-xs text-slate-400 font-medium">눈매 & 눈웃음 닮음</span>
               <span id="score-eyes" class="text-xs font-bold text-indigo-400">0%</span>
             </div>
             <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mb-2">
               <div id="bar-eyes" class="bg-indigo-500 h-1.5 rounded-full transition-all duration-1000 w-0"></div>
             </div>
-            <p class="text-[11px] text-slate-500">쌍꺼풀, 눈꼬리, 내안각 거리</p>
+            <p class="text-[11px] text-slate-500">쌍꺼풀 라인, 눈꼬리, 미소 시 눈매</p>
           </div>
 
           <!-- Nose -->
           <div class="bg-slate-900/60 rounded-xl p-4 border border-white/5">
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-slate-400 font-medium">콧대 및 비폭</span>
+              <span class="text-xs text-slate-400 font-medium">콧대 & 코끝 닮음</span>
               <span id="score-nose" class="text-xs font-bold text-indigo-400">0%</span>
             </div>
             <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mb-2">
               <div id="bar-nose" class="bg-indigo-500 h-1.5 rounded-full transition-all duration-1000 w-0"></div>
             </div>
-            <p class="text-[11px] text-slate-500">비근부 높이, 코끝 형태</p>
+            <p class="text-[11px] text-slate-500">비근부 높이, 콧망울 너비, 코끝 형태</p>
           </div>
 
           <!-- Mouth -->
           <div class="bg-slate-900/60 rounded-xl p-4 border border-white/5">
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-slate-400 font-medium">입술 및 인중</span>
+              <span class="text-xs text-slate-400 font-medium">입술 & 하관/미소 닮음</span>
               <span id="score-mouth" class="text-xs font-bold text-indigo-400">0%</span>
             </div>
             <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mb-2">
               <div id="bar-mouth" class="bg-indigo-500 h-1.5 rounded-full transition-all duration-1000 w-0"></div>
             </div>
-            <p class="text-[11px] text-slate-500">입술 두께, 입꼬리, 인중 비율</p>
+            <p class="text-[11px] text-slate-500">입술 두께, 인중 길이, 웃을 때의 입꼬리</p>
           </div>
 
           <!-- Features -->
           <div class="bg-slate-900/60 rounded-xl p-4 border border-white/5">
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-slate-400 font-medium">고유 생체 특징</span>
+              <span class="text-xs text-slate-400 font-medium">고유 인상 & 붕어빵 분위기</span>
               <span id="score-features" class="text-xs font-bold text-indigo-400">0%</span>
             </div>
             <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mb-2">
               <div id="bar-features" class="bg-indigo-500 h-1.5 rounded-full transition-all duration-1000 w-0"></div>
             </div>
-            <p class="text-[11px] text-slate-500">점, 흉터, 골격 비대칭성</p>
+            <p class="text-[11px] text-slate-500">유전적 분위기, 표정 싱크로율</p>
           </div>
         </div>
       </div>
@@ -399,7 +417,7 @@
         <div class="glass-card rounded-2xl p-6">
           <div class="flex items-center space-x-2 mb-3 text-emerald-400 font-bold text-sm">
             <i data-lucide="check-circle-2" class="w-4 h-4"></i>
-            <span>주요 공통점 (Similarities)</span>
+            <span>가장 쏙 빼닮은 붕어빵 포인트 (공통점)</span>
           </div>
           <ul id="list-similarities" class="space-y-2 text-xs text-slate-300">
             <!-- Dynamic list items -->
@@ -409,8 +427,8 @@
         <!-- Differences -->
         <div class="glass-card rounded-2xl p-6">
           <div class="flex items-center space-x-2 mb-3 text-amber-400 font-bold text-sm">
-            <i data-lucide="alert-circle" class="w-4 h-4"></i>
-            <span>주요 차이점 (Differences)</span>
+            <i data-lucide="sparkle" class="w-4 h-4"></i>
+            <span>각자의 개성적 포인트 (차이점)</span>
           </div>
           <ul id="list-differences" class="space-y-2 text-xs text-slate-300">
             <!-- Dynamic list items -->
@@ -425,8 +443,8 @@
         <!-- Environmental Factors -->
         <div class="glass-card rounded-2xl p-6 md:col-span-1">
           <div class="flex items-center space-x-2 mb-3 text-indigo-400 font-bold text-sm">
-            <i data-lucide="sun-medium" class="w-4 h-4"></i>
-            <span>촬영 환경 및 외적 변수</span>
+            <i data-lucide="shield-check" class="w-4 h-4"></i>
+            <span>나이 및 성별 보정 요인</span>
           </div>
           <p id="text-environmental" class="text-xs text-slate-300 leading-relaxed">
             조명, 촬영 각도, 표정, 안경 등 외적 요인 분석
