@@ -9,8 +9,6 @@ import re
 import json
 import base64
 import logging
-import urllib.request
-import urllib.parse
 from typing import Dict, Any, List, Optional, Tuple
 
 import cv2
@@ -198,42 +196,48 @@ def extract_face_embedding(image_bytes: bytes) -> Optional[np.ndarray]:
         return None
 
 
-def download_wikipedia_portrait(query: str, lang: str, out_path: str, timeout: float = 8) -> bool:
+# ArcFace cosine -> human-facing percentage, piecewise-linear between anchors.
+# Anchors come from tools/calibrate_scores.py (2026-09 run, single photo vs single photo):
+#   strangers (3000 pairs)   p50 0.008  p90 0.091  p95 0.114
+#   kin (740 real pairs)     p25 0.076  p50 0.136  p75 0.204  p90 0.285  p95 0.351
+#   same person (567 pairs)  p5 0.325   p10 0.389  p25 0.473  p50 0.567
+#   celebrity top-1 vs DB    p5 0.243   p50 0.327  p90 0.393  p95 0.414
+SIMILARITY_ANCHORS = {
+    # Two photos, "how alike do these two people look". Verdicts: >=82 판박이, >=68 매우 높음, >=50 은근한, >=35 낮음.
+    # stranger median -> ~20 (남남), kin median -> ~54 (은근한), kin p75 -> ~68, kin p90 -> ~81, same person -> 95+
+    "family": [(-1.0, 3), (-0.05, 10), (0.0, 18), (0.05, 30), (0.10, 42), (0.14, 55), (0.20, 68),
+               (0.28, 80), (0.35, 87), (0.45, 92), (0.60, 96), (1.0, 99)],
+    # Two photos, "is this the same person". Verdicts: >=85 확실, >=70 유력, >=50 가능성 낮음.
+    # kin p95 -> ~63 (not "유력"), same-person p10 -> ~71, same-person p25 -> ~85
+    "identical": [(-1.0, 1), (0.0, 3), (0.15, 15), (0.25, 35), (0.32, 55), (0.38, 70), (0.47, 85),
+                  (0.60, 94), (0.80, 98), (1.0, 99)],
+    # One photo vs a celebrity's multi-photo mean. Typical best match (p50) -> ~72, top 5% -> ~84, same person -> 95+
+    "celebrity": [(-1.0, 5), (0.0, 20), (0.15, 45), (0.24, 60), (0.30, 68), (0.33, 72), (0.37, 78),
+                  (0.42, 85), (0.50, 91), (0.60, 95), (1.0, 99)],
+}
+
+
+def similarity_to_percent(cosine: float, profile: str = "family") -> int:
+    xs, ys = zip(*SIMILARITY_ANCHORS.get(profile, SIMILARITY_ANCHORS["family"]))
+    return int(round(float(np.interp(cosine, xs, ys))))
+
+
+def adjust_part_scores(parts: Optional[Dict[str, Any]], overall: int, keys: List[str]) -> Dict[str, int]:
     """
-    Search Wikipedia for `query`, download the page's lead image, square-crop it
-    (biased toward the top third where faces usually are) to 600x600 and save as JPEG.
-    Returns False when no image is found; network/decoding errors propagate.
+    Re-center LLM per-part scores on the measured overall score: keep which parts the LLM thought
+    were more/less alike, but not its absolute level (which is poorly calibrated).
     """
-    encoded = urllib.parse.quote(query)
-    url = (
-        f"https://{lang}.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch={encoded}"
-        "&gsrlimit=1&prop=pageimages&piprop=original&format=json"
-    )
-    req = urllib.request.Request(url, headers=HTTP_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.loads(r.read().decode("utf-8"))
+    values = {}
+    for k in keys:
+        try:
+            values[k] = float((parts or {}).get(k))
+        except (TypeError, ValueError):
+            pass
+    if len(values) < len(keys):
+        return {k: overall for k in keys}
+    center = sum(values.values()) / len(values)
+    return {k: int(max(5, min(99, round(overall + (values[k] - center) * 0.5)))) for k in keys}
 
-    img_url = None
-    for info in data.get("query", {}).get("pages", {}).values():
-        if "original" in info and "source" in info["original"]:
-            img_url = info["original"]["source"]
-            break
-    if not img_url:
-        return False
 
-    img_req = urllib.request.Request(img_url, headers=HTTP_HEADERS)
-    with urllib.request.urlopen(img_req, timeout=timeout + 4) as ir:
-        raw_bytes = ir.read()
-
-    with Image.open(io.BytesIO(raw_bytes)) as img:
-        img = img.convert("RGB")
-        w, h = img.size
-        min_dim = min(w, h)
-        left = (w - min_dim) // 2
-        top = max(0, (h - min_dim) // 3)
-        if top + min_dim > h:
-            top = h - min_dim
-        cropped = img.crop((left, top, left + min_dim, top + min_dim))
-        cropped.resize((600, 600), Image.Resampling.LANCZOS).save(out_path, format="JPEG", quality=85, optimize=True)
-
-    return True
+def data_url_to_bytes(data: str) -> bytes:
+    return base64.b64decode(data.split(",", 1)[1] if "," in data else data)

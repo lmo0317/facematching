@@ -73,7 +73,7 @@ function getBaseUrl() {
 }
 const BASE_URL = getBaseUrl();
 
-document.addEventListener('DOMContentLoaded', () => {
+function initApp() {
   checkServerHealth();
   loadSamplePresetsList();
   setupClipboardPaste();
@@ -82,7 +82,14 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-health-check')?.addEventListener('click', () => {
     checkServerHealth();
   });
-});
+}
+
+// index.html injects this script dynamically, so DOMContentLoaded has usually fired already
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initApp);
+} else {
+  initApp();
+}
 
 function setupKeyboardShortcuts() {
   window.addEventListener('keydown', (e) => {
@@ -962,6 +969,17 @@ function renderResults(data) {
     : score >= 35 ? '일부 특정 부위에서 닮은 느낌이 있으나, 각자의 뚜렷한 개성이 더 돋보입니다.'
     : '얼굴 골격과 이목구비 전반에 걸쳐 서로 다른 고유한 개성을 지니고 있습니다.';
 
+  const breakdownEl = document.getElementById('score-breakdown');
+  const bd = data.score_breakdown || {};
+  if (breakdownEl && bd.face_recognition != null) {
+    const llmPart = bd.llm != null && bd.face_weight < 1
+      ? ` · AI 시각 판단 ${bd.llm}% (반영 ${Math.round((1 - bd.face_weight) * 100)}%)` : '';
+    breakdownEl.textContent = `얼굴 인식 AI 측정 ${bd.face_recognition}% (반영 ${Math.round(bd.face_weight * 100)}%)${llmPart}`;
+    breakdownEl.classList.remove('hidden');
+  } else if (breakdownEl) {
+    breakdownEl.classList.add('hidden');
+  }
+
   // Component Scores
   const updateBar = (id, val) => {
     const v = Math.max(0, Math.min(100, val || 0));
@@ -1085,10 +1103,10 @@ async function startCelebritySearch() {
   loadingSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
   const steps = [
-    { title: '이목구비 골격 및 동물상 분위기 분석 중...', step: '1단계: 얼굴형, 눈매, 코, 입매, 동물상 분위기 인코딩', progress: 25 },
-    { title: '한국 연예인 데이터베이스 싱크로율 매칭 중...', step: '2단계: 유명 배우, 아이돌, 방송인 중 가장 닮은 후보 탐색', progress: 50 },
-    { title: '가장 닮은 연예인 고화질 사진 로드 중...', step: '3단계: 1위 연예인 고화질 프로필 사진 검색 및 매칭', progress: 75 },
-    { title: '1:1 정밀 싱크로율 대조 및 감정서 작성 중...', step: '4단계: 세부 부위별 싱크로율 및 매력 포인트 도출', progress: 90 },
+    { title: '얼굴 검출 및 특징 추출 중...', step: '1단계: 얼굴 정렬 후 ArcFace 512차원 얼굴 특징 벡터 추출', progress: 25 },
+    { title: '연예인 얼굴 데이터베이스와 비교 중...', step: '2단계: 연예인별 여러 장의 사진으로 만든 얼굴 특징과 유사도 계산', progress: 50 },
+    { title: '가장 닮은 연예인 TOP 3 선정 중...', step: '3단계: 유사도 순위 및 닮음 점수 산출', progress: 75 },
+    { title: '닮은 부위 설명 작성 중...', step: '4단계: Gemma 4가 사진을 비교해 닮은 포인트 설명', progress: 90 },
   ];
 
   let stepIdx = 0;
@@ -1131,6 +1149,12 @@ async function startCelebritySearch() {
   }
 }
 
+function escapeHtml(text) {
+  return String(text ?? '').replace(/[&<>"']/g, ch => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+  ));
+}
+
 function renderCelebrityResults(data) {
   const resultsSection = document.getElementById('celeb-results-section');
   resultsSection.classList.remove('hidden');
@@ -1143,11 +1167,7 @@ function renderCelebrityResults(data) {
   // 1. Photos
   document.getElementById('celeb-result-user-img').src = photoCelebData;
   const matchImg = document.getElementById('celeb-result-match-img');
-  if (top.photo_url) {
-    matchImg.src = top.photo_url;
-  } else {
-    matchImg.src = BASE_URL + '/static/celebrities/jung_woo_sung.jpg';
-  }
+  matchImg.src = top.photo_url || '';
   document.getElementById('top-celeb-label').textContent = `${top.name || '연예인'} (${top.category || '배우'})`;
 
   // 2. Titles & Summaries
@@ -1233,19 +1253,18 @@ function renderCelebrityResults(data) {
     const card = document.createElement('div');
     card.className = 'glass-card rounded-2xl p-4 border border-white/10 flex items-center space-x-4 bg-slate-900/60';
     
-    const photoUrl = c.photo_url || (BASE_URL + '/static/celebrities/gong_yoo.jpg');
     const medal = c.rank === 2 ? '🥈 2위' : '🥉 3위';
     card.innerHTML = `
       <div class="w-16 h-16 rounded-xl overflow-hidden shrink-0 border border-white/10 bg-slate-800">
-        <img src="${photoUrl}" alt="${c.name}" class="w-full h-full object-cover" onerror="this.src='${BASE_URL}/static/celebrities/gong_yoo.jpg'">
+        <img src="${escapeHtml(c.photo_url || '')}" alt="${escapeHtml(c.name)}" class="w-full h-full object-cover" onerror="this.style.visibility='hidden'">
       </div>
       <div class="flex-1 min-w-0">
         <div class="flex items-center justify-between mb-1">
-          <span class="text-xs font-bold text-amber-300">${medal}: ${c.name} <span class="text-[11px] text-slate-400 font-normal">(${c.category || '연예인'})</span></span>
-          <span class="px-2 py-0.5 rounded-full text-[11px] font-extrabold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">${c.similarity_percent || 75}%</span>
+          <span class="text-xs font-bold text-amber-300">${medal}: ${escapeHtml(c.name)} <span class="text-[11px] text-slate-400 font-normal">(${escapeHtml(c.category || '연예인')})</span></span>
+          <span class="px-2 py-0.5 rounded-full text-[11px] font-extrabold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">${Number(c.similarity_percent) || 0}%</span>
         </div>
-        <p class="text-xs text-slate-300 truncate">${c.summary || c.reason || '분위기와 이목구비 비율이 유사합니다.'}</p>
-        <p class="text-[11px] text-slate-400 line-clamp-1 mt-0.5">${c.reason || ''}</p>
+        <p class="text-xs text-slate-300 truncate">${escapeHtml(c.summary || c.reason || '')}</p>
+        <p class="text-[11px] text-slate-400 line-clamp-1 mt-0.5">${escapeHtml(c.reason || '')}</p>
       </div>
     `;
     candContainer.appendChild(card);

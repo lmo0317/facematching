@@ -14,7 +14,10 @@ import httpx
 import cv2
 import numpy as np
 
-from face_utils import YUNET_PATH, compute_square_face_box, image_bytes_to_data_url, extract_json_block, strip_thought_tags
+from face_utils import (
+    YUNET_PATH, compute_square_face_box, image_bytes_to_data_url, extract_json_block, strip_thought_tags,
+    extract_face_embedding, similarity_to_percent, adjust_part_scores, data_url_to_bytes,
+)
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -407,8 +410,8 @@ async def find_celebrity_endpoint(req: CelebrityMatchRequest):
     if not img.startswith("data:"):
         img = f"data:image/jpeg;base64,{img}"
 
+    from celebrity_service import execute_celebrity_lookalike, FaceNotFoundError
     try:
-        from celebrity_service import execute_celebrity_lookalike
         result = await execute_celebrity_lookalike(
             image_b64=img,
             gender_filter=req.gender_filter or "auto",
@@ -416,13 +419,74 @@ async def find_celebrity_endpoint(req: CelebrityMatchRequest):
             model_name=MODEL_NAME
         )
         return result
+    except FaceNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Celebrity match error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"닮은 연예인 검색 중 오류 발생: {str(e)}")
 
 
+PART_KEYS = ["eyes", "nose", "mouth", "face_shape", "features"]
+# Share of the final score taken from the ArcFace measurement (rest: Gemma's visual judgement).
+# Gemma alone could not separate family from strangers in testing, so the measurement dominates.
+FACE_SCORE_WEIGHT = {"family": 0.8, "celebrity": 0.8, "identical": 1.0}
+
+
 async def execute_face_comparison(img1_url: str, img2_url: str, mode: str = "family") -> Dict[str, Any]:
-    """Call Gemma 4 E4B multimodal LLM and perform calibrated facial similarity/resemblance evaluation."""
+    """ArcFace similarity (primary score) + Gemma 4 visual analysis (per-part pattern and written report)."""
+    emb1 = extract_face_embedding(data_url_to_bytes(img1_url))
+    emb2 = extract_face_embedding(data_url_to_bytes(img2_url))
+    cosine = float(emb1 @ emb2) if emb1 is not None and emb2 is not None else None
+    face_score = similarity_to_percent(cosine, "identical" if mode == "identical" else "family") if cosine is not None else None
+
+    llm_ok = True
+    try:
+        analysis, raw_text = await request_gemma_comparison(img1_url, img2_url, mode, face_score)
+    except HTTPException as e:
+        if face_score is None:
+            raise
+        logger.warning(f"Gemma unavailable ({e.detail}); returning face-recognition-only result")
+        llm_ok, raw_text = False, None
+        analysis = {
+            "detailed_scores": {k: face_score for k in PART_KEYS},
+            "similarity_score": face_score,
+            "verdict_summary": f"얼굴 인식 AI가 측정한 두 얼굴의 골격·이목구비 유사도는 {face_score}%입니다.",
+            "similarities": [],
+            "differences": [],
+            "environmental_factors": "AI 소견 서버가 응답하지 않아 얼굴 인식 측정값만 표시합니다.",
+            "comprehensive_analysis": "상세 소견을 생성하지 못했습니다. 잠시 후 다시 시도하면 부위별 설명을 볼 수 있습니다.",
+        }
+
+    llm_score = analysis["similarity_score"]
+    if face_score is not None:
+        weight = FACE_SCORE_WEIGHT.get(mode, 0.8) if llm_ok else 1.0
+        final_score = int(round(weight * face_score + (1 - weight) * llm_score))
+        analysis["detailed_scores"] = adjust_part_scores(analysis["detailed_scores"], final_score, PART_KEYS)
+    else:
+        weight = 0.0
+        final_score = llm_score
+        analysis["environmental_factors"] = (analysis.get("environmental_factors") or "") + \
+            " (한쪽 사진에서 얼굴을 인식하지 못해 AI 시각 판단만으로 점수를 산출했습니다.)"
+
+    analysis["similarity_score"] = final_score
+    analysis["verdict"] = get_verdict_for_score(final_score, mode)
+    analysis["score_breakdown"] = {
+        "face_recognition": face_score,
+        "cosine": round(cosine, 4) if cosine is not None else None,
+        "llm": llm_score if llm_ok else None,
+        "face_weight": weight,
+    }
+    return {
+        "success": True,
+        "model": MODEL_NAME,
+        "data": analysis,
+        "raw_output": raw_text if raw_text and logger.isEnabledFor(logging.DEBUG) else None
+    }
+
+
+async def request_gemma_comparison(img1_url: str, img2_url: str, mode: str,
+                                   face_score: Optional[int]) -> Tuple[Dict[str, Any], str]:
+    """Gemma 4 E4B visual comparison. Returns (analysis with calibrated LLM scores, raw text); raises HTTPException."""
     
     if mode == "identical":
         mode_title = "동일 인물 정밀 대조 (신원 확인)"
@@ -474,8 +538,18 @@ async def execute_face_comparison(img1_url: str, img2_url: str, mode: str = "fam
             "     (붕어빵: 75~95점 | 부분 유사: 45~65점 | 남남: 15~35점)\n"
         )
 
+    reference = ""
+    if face_score is not None:
+        reference = (
+            f"【참고 측정값】: 얼굴 인식 AI(ArcFace)가 두 얼굴의 골격·이목구비 구조를 수치로 비교한 유사도는 {face_score}%이며, "
+            f"이에 따른 판정은 '{get_verdict_for_score(face_score, mode)}'입니다.\n"
+            "verdict_summary와 comprehensive_analysis는 반드시 이 판정과 같은 결론으로 작성하세요 "
+            "(판정보다 약하게 '분위기만 비슷하다'거나 더 강하게 쓰지 마세요). "
+            "그 결론을 뒷받침하는 공통점과 차이점을 사진에서 찾아 설명하고, 부위별 점수는 직접 관찰해 부위 간 차이가 드러나게 매기세요.\n\n"
+        )
+
     system_instruction = (
-        f"{mode_instruction}\n\n"
+        f"{mode_instruction}\n\n{reference}"
         "반드시 다음 JSON 스키마 형식으로만 출력하세요 (마크다운 코드블록이나 서두/결말 문장 없이 순수한 JSON 문자열만 출력):\n"
         "{\n"
         '  "detailed_scores": {\n'
@@ -543,46 +617,30 @@ async def execute_face_comparison(img1_url: str, img2_url: str, mode: str = "fam
             content_text = choices[0].get("message", {}).get("content", "")
             parsed_analysis = extract_json_from_response(content_text)
 
-            # Extract raw scores
+            # Calibrate Gemma's raw scores into the human-perceived scale
             det = parsed_analysis.get("detailed_scores", {})
-            eyes_raw = float(det.get("eyes", 40))
-            nose_raw = float(det.get("nose", 40))
-            mouth_raw = float(det.get("mouth", 40))
-            face_raw = float(det.get("face_shape", 40))
-            feat_raw = float(det.get("features", 40))
+            raw_parts = {}
+            for k in PART_KEYS:
+                try:
+                    raw_parts[k] = float(det.get(k, 40))
+                except (TypeError, ValueError):
+                    raw_parts[k] = 40.0
+            parsed_analysis["detailed_scores"] = {k: calibrate_similarity_score(v) for k, v in raw_parts.items()}
 
-            # 1. Calibrate each detailed score into human-perceived scale
-            cal_det = {
-                "eyes": calibrate_similarity_score(eyes_raw),
-                "nose": calibrate_similarity_score(nose_raw),
-                "mouth": calibrate_similarity_score(mouth_raw),
-                "face_shape": calibrate_similarity_score(face_raw),
-                "features": calibrate_similarity_score(feat_raw),
-            }
-            parsed_analysis["detailed_scores"] = cal_det
+            try:
+                raw_llm = float(parsed_analysis.get("similarity_score", 40))
+            except (TypeError, ValueError):
+                raw_llm = 40.0
+            raw_weighted = (raw_parts["eyes"] * 0.25 + raw_parts["nose"] * 0.20 + raw_parts["mouth"] * 0.20
+                            + raw_parts["face_shape"] * 0.20 + raw_parts["features"] * 0.15)
+            parsed_analysis["similarity_score"] = calibrate_similarity_score(0.4 * raw_llm + 0.6 * raw_weighted)
 
-            # 2. Calibrate overall similarity score
-            raw_llm = float(parsed_analysis.get("similarity_score", 40))
-            raw_weighted = (eyes_raw * 0.25 + nose_raw * 0.20 + mouth_raw * 0.20 + face_raw * 0.20 + feat_raw * 0.15)
-            combined_raw = 0.4 * raw_llm + 0.6 * raw_weighted
-
-            final_score = calibrate_similarity_score(combined_raw)
-            parsed_analysis["similarity_score"] = final_score
-            parsed_analysis["verdict"] = get_verdict_for_score(final_score, mode)
-
-            # Ensure all required keys exist
             parsed_analysis.setdefault("verdict_summary", "분석이 완료되었습니다.")
             parsed_analysis.setdefault("similarities", [])
             parsed_analysis.setdefault("differences", [])
             parsed_analysis.setdefault("environmental_factors", "특이사항 없음")
             parsed_analysis.setdefault("comprehensive_analysis", content_text)
-
-            return {
-                "success": True,
-                "model": MODEL_NAME,
-                "data": parsed_analysis,
-                "raw_output": content_text if logger.isEnabledFor(logging.DEBUG) else None
-            }
+            return parsed_analysis, content_text
 
     except httpx.TimeoutException:
         logger.error("LLM Server timeout")

@@ -88,11 +88,11 @@ CELEBRITY_CATALOG = [
     {"name": "이도현", "query": "이도현 (배우)", "en_query": "Lee Do-hyun", "file": "lee_do_hyun.jpg", "gender": "male", "category": "배우", "face_type": "매력적인 입꼬리와 맑고 깊은 눈", "vibe": "청량한 소년미와 성숙한 카리스마가 공존하는 마스크"},
 
     # 듬직 / 선 굵은 카리스마 / 상남자형
-    {"name": "이정재", "query": "이정재", "file": "lee_jung_jae.jpg", "gender": "male", "category": "배우", "face_type": "매력적인 광대와 기품 있는 미소", "vibe": "고급스럽고 중후한 매력, 웃을 때 번지는 눈웃음과 턱선"},
+    {"name": "이정재", "query": "이정재", "en_query": "Lee Jung-jae", "file": "lee_jung_jae.jpg", "gender": "male", "category": "배우", "face_type": "매력적인 광대와 기품 있는 미소", "vibe": "고급스럽고 중후한 매력, 웃을 때 번지는 눈웃음과 턱선"},
     {"name": "하정우", "query": "하정우", "file": "ha_jung_woo.jpg", "gender": "male", "category": "배우", "face_type": "선 굵고 묵직한 카리스마", "vibe": "남성미 넘치는 턱선과 짙은 눈빛, 거침없는 아우라"},
     {"name": "이병헌", "query": "이병헌", "file": "lee_byung_hun.jpg", "gender": "male", "category": "배우", "face_type": "강렬하고 묵직한 하관과 깊은 눈빛", "vibe": "단단한 턱선, 압도적인 눈빛과 신뢰감을 주는 골격"},
     {"name": "마동석", "query": "마동석", "file": "ma_dong_seok.jpg", "gender": "male", "category": "배우", "face_type": "다부지고 듬직한 베어(곰)상", "vibe": "묵직하고 단단한 하관과 푸근하면서도 압도적인 카리스마"},
-    {"name": "황정민", "query": "황정민 (배우)", "file": "hwang_jung_min.jpg", "gender": "male", "category": "배우", "face_type": "사람 냄새 나는 따뜻하고 깊은 마스크", "vibe": "진솔한 눈매와 친근한 주름, 진정성 넘치는 인상"},
+    {"name": "황정민", "query": "황정민 (배우)", "en_query": "Hwang Jung-min", "file": "hwang_jung_min.jpg", "gender": "male", "category": "배우", "face_type": "사람 냄새 나는 따뜻하고 깊은 마스크", "vibe": "진솔한 눈매와 친근한 주름, 진정성 넘치는 인상"},
     {"name": "조진웅", "query": "조진웅", "file": "cho_jin_woong.jpg", "gender": "male", "category": "배우", "face_type": "듬직하고 웅장한 호랑이상", "vibe": "묵직한 안면 골격과 신뢰감을 주는 중후한 매력"},
 
     # 친근 / 호감 / 푸근 / 동글형
@@ -100,7 +100,7 @@ CELEBRITY_CATALOG = [
     {"name": "조세호", "query": "조세호", "file": "cho_sae_ho.jpg", "gender": "male", "category": "방송인", "face_type": "동글동글 푸근한 복덩이 미소", "vibe": "통통하고 귀여운 볼살, 친근하고 유쾌한 에너지"},
     {"name": "싸이", "query": "싸이 (가수)", "file": "psy.jpg", "gender": "male", "category": "가수", "face_type": "에너지 넘치고 개성 있는 둥근 얼굴", "vibe": "자신감 넘치는 눈빛과 시원한 미소, 독보적인 캐릭터"},
     {"name": "유재석", "query": "유재석", "file": "yoo_jae_suk.jpg", "gender": "male", "category": "방송인", "face_type": "친근하고 밝은 국민 MC상", "vibe": "선하고 지적인 눈매, 시원한 입매와 신뢰감을 주는 표정"},
-    {"name": "신동엽", "query": "신동엽 (방송인)", "file": "shin_dong_yup.jpg", "gender": "male", "category": "방송인", "face_type": "오밀조밀 모인 개성 만점 호감상", "vibe": "장난기 넘치는 눈웃음과 재치 있는 인상"},
+    {"name": "신동엽", "query": "신동엽 (방송인)", "en_query": "Shin Dong-yup", "file": "shin_dong_yup.jpg", "gender": "male", "category": "방송인", "face_type": "오밀조밀 모인 개성 만점 호감상", "vibe": "장난기 넘치는 눈웃음과 재치 있는 인상"},
     {"name": "기안84", "query": "기안84", "file": "kian84.jpg", "gender": "male", "category": "방송인", "face_type": "날것 그대로의 순수하고 호탕한 인상", "vibe": "꾸밈없는 담백한 눈매와 시원털털한 미소"},
     {"name": "손흥민", "query": "손흥민", "file": "son_heung_min.jpg", "gender": "male", "category": "스포츠", "face_type": "기분 좋아지는 반달 눈웃음의 승부사", "vibe": "동양적인 매력의 무쌍 눈매와 건강하고 활기찬 에너지"},
     {"name": "임영웅", "query": "임영웅", "file": "lim_young_woong.jpg", "gender": "male", "category": "가수", "face_type": "따뜻하고 훈훈한 국민 힐러상", "vibe": "선한 눈망울과 차분한 입매, 신뢰와 위로를 주는 인상"},
@@ -171,37 +171,61 @@ SELECT ?p ?ko ?en ?gender ?cat ?img ?links ?occ WHERE {
 
 _print_lock = threading.Lock()
 
+# Wikimedia returns 429 when bots go too fast: one shared request clock for all worker threads,
+# and a 429's Retry-After pauses everyone.
+MIN_REQUEST_INTERVAL = 0.35
+_rate_lock = threading.Lock()
+_next_request_at = 0.0
+
 
 def log(msg: str):
     with _print_lock:
         print(msg, flush=True)
 
 
-def _retry_sleep(attempt: int, error: Exception):
-    time.sleep(10 if "429" in str(error) else 2 * (attempt + 1))
+def _throttle():
+    global _next_request_at
+    with _rate_lock:
+        now = time.monotonic()
+        wait = _next_request_at - now
+        _next_request_at = max(now, _next_request_at) + MIN_REQUEST_INTERVAL
+    if wait > 0:
+        time.sleep(wait)
 
 
-def http_json(url: str, timeout: float = 20, retries: int = 3):
-    for attempt in range(retries):
+def _backoff(error: Exception, attempt: int):
+    global _next_request_at
+    if getattr(error, "code", None) == 429:
         try:
-            req = urllib.request.Request(url, headers={**HTTP_HEADERS, "Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read().decode("utf-8"))
-        except Exception as e:
-            if attempt == retries - 1:
-                raise
-            _retry_sleep(attempt, e)
+            delay = float(error.headers.get("Retry-After") or 10) + 1
+        except (TypeError, ValueError, AttributeError):
+            delay = 11
+        with _rate_lock:
+            _next_request_at = max(_next_request_at, time.monotonic() + delay)
+    else:
+        delay = 2 * (attempt + 1)
+    time.sleep(delay)
 
 
-def http_bytes(url: str, timeout: float = 20, retries: int = 3) -> bytes:
+def _fetch(url: str, timeout: float, accept_json: bool, retries: int = 6) -> bytes:
+    headers = {**HTTP_HEADERS, "Accept": "application/json"} if accept_json else HTTP_HEADERS
     for attempt in range(retries):
+        _throttle()
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=HTTP_HEADERS), timeout=timeout) as r:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as r:
                 return r.read()
         except Exception as e:
-            if attempt == retries - 1:
+            if attempt == retries - 1 or getattr(e, "code", None) == 404:
                 raise
-            _retry_sleep(attempt, e)
+            _backoff(e, attempt)
+
+
+def http_json(url: str, timeout: float = 20):
+    return json.loads(_fetch(url, timeout, accept_json=True).decode("utf-8"))
+
+
+def http_bytes(url: str, timeout: float = 20) -> bytes:
+    return _fetch(url, timeout, accept_json=False)
 
 
 def clean_name(name: str) -> str:
@@ -251,8 +275,14 @@ def resolve_seed(seed: dict):
         if not qid:
             continue
         ent = http_json("https://www.wikidata.org/w/api.php?" + urllib.parse.urlencode({
-            "action": "wbgetentities", "ids": qid, "props": "claims|labels", "languages": "en",
+            "action": "wbgetentities", "ids": qid, "props": "claims|labels|aliases", "languages": "ko|en",
             "format": "json"}))["entities"][qid]
+        # Search can land on a different person (e.g. a namesake); require the Korean label/alias to match
+        ko_names = [ent.get("labels", {}).get("ko", {}).get("value", "")]
+        ko_names += [a["value"] for a in ent.get("aliases", {}).get("ko", [])]
+        if seed["name"] not in {clean_name(n) for n in ko_names}:
+            log(f"[WARN] seed '{seed['name']}': search for '{query}' found {qid} ({ko_names[0] or '?'}), skipped")
+            continue
         claims = ent.get("claims", {})
 
         def claim(pid):
@@ -261,6 +291,10 @@ def resolve_seed(seed: dict):
             except (KeyError, IndexError):
                 return None
 
+        if not claim("P373") and not claim("P18"):
+            # Namesakes without any Commons photo are almost never the celebrity we mean
+            log(f"[WARN] seed '{seed['name']}': {qid} has no Commons photos, trying next query")
+            continue
         return {
             "qid": qid,
             "name_en": clean_name(ent.get("labels", {}).get("en", {}).get("value", "")),
@@ -306,13 +340,18 @@ def load_person_photos(person: dict) -> list:
     """Download (or read cached) photos; returns [(file title, raw bytes)]."""
     folder = os.path.join(CACHE_DIR, person["qid"])
     manifest_path = os.path.join(folder, "manifest.json")
+    manifest = None
     if os.path.exists(manifest_path):
         with open(manifest_path, encoding="utf-8") as f:
-            manifest = json.load(f)
-    else:
+            cached = json.load(f)
+        # Reuse only complete downloads (older runs lost photos to rate limiting)
+        if isinstance(cached, dict) and len(cached["photos"]) >= cached["expected"]:
+            manifest = cached["photos"]
+    if manifest is None:
         os.makedirs(folder, exist_ok=True)
+        listed = list_commons_photos(person)
         manifest = []
-        for i, (title, url) in enumerate(list_commons_photos(person)):
+        for i, (title, url) in enumerate(listed):
             try:
                 data = http_bytes(url)
             except Exception as e:
@@ -323,7 +362,7 @@ def load_person_photos(person: dict) -> list:
                 f.write(data)
             manifest.append({"title": title, "file": fname})
         with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False)
+            json.dump({"expected": len(listed), "photos": manifest}, f, ensure_ascii=False)
 
     photos = []
     for m in manifest:

@@ -7,7 +7,7 @@
 
 ## 1. 프로젝트 개요
 
-Gemma 4 E4B 멀티모달(Vision) LLM + OpenCV 얼굴 인식 모델을 이용한 **얼굴 닮음 분석 웹앱**입니다.
+얼굴 인식 임베딩(ArcFace) + Gemma 4 E4B 멀티모달 LLM을 이용한 **얼굴 닮음 분석 웹앱**입니다.
 핵심 기능은 두 가지입니다.
 
 | 탭 | 기능 | API |
@@ -15,30 +15,36 @@ Gemma 4 E4B 멀티모달(Vision) LLM + OpenCV 얼굴 인식 모델을 이용한 
 | `compare` | **사진 2장 닮음 분석** (가족·붕어빵 지수) | `POST /api/compare-json` |
 | `celeb` | **내 사진으로 닮은 연예인 찾기** (TOP 3 + 실사진) | `POST /api/find-celebrity` |
 
+**역할 분담 원칙 (중요)**
+- **점수·후보 선정은 ArcFace 임베딩이 담당**합니다. 같은 입력이면 항상 같은 결과가 나오고 실제 얼굴 구조에 근거합니다.
+- **Gemma 4는 설명 문장과 부위별 패턴만 담당**합니다. Gemma 4 E4B는 얼굴로 연예인을 식별하지 못하고(본인 사진을 넣어도 인기 연예인 이름을 돌려막기), 가족/남남 점수도 구분하지 못하는 것이 실측으로 확인됐습니다. Gemma에게 점수나 후보 선정을 다시 맡기지 마세요.
+
 - 백엔드: Python 3.12, FastAPI + Uvicorn (단일 프로세스, 빌드 단계 없음)
 - 프론트엔드: 순수 HTML/JS (프레임워크·번들러 없음), Tailwind/Lucide/Cropper.js는 CDN 로드
 - LLM: 로컬 `llama-server`(llama.cpp)의 OpenAI 호환 `/v1/chat/completions` 엔드포인트
-- 얼굴 검출/임베딩: OpenCV YuNet(검출) + SFace(128-D 임베딩)
+- 얼굴 검출: OpenCV YuNet / 얼굴 임베딩: InsightFace ArcFace `w600k_r50` (512-D, onnxruntime CPU)
 
 ---
 
 ## 2. 디렉터리 구조
 
 ```
-app.py                     # FastAPI 앱: 라우트, 얼굴 검출, 2장 비교 로직, 점수 보정
-celebrity_service.py       # 닮은 연예인 탐색 엔진 (app.py에서 지연 import)
-face_utils.py              # 공용 헬퍼: 이미지→data URL, LLM JSON 추출, SFace 임베딩, 위키백과 사진 다운로드
-populate_celebrities.py    # 오프라인 스크립트: 연예인 사진 다운로드 + SFace 임베딩 DB 생성
-celebrity_db.json          # 연예인 메타데이터 + 128-D 임베딩 (populate 스크립트 산출물, ~82명)
+app.py                     # FastAPI 앱: 라우트, 얼굴 검출 API, 2장 비교(ArcFace+Gemma 결합)
+celebrity_service.py       # 닮은 연예인 탐색 (ArcFace 최근접 검색 + Gemma 설명), app.py에서 지연 import
+face_utils.py              # 공용: 이미지 정규화, YuNet 검출, ArcFace 정렬·임베딩, 유사도→% 환산, LLM JSON 추출
+populate_celebrities.py    # 오프라인: Wikidata/Commons에서 연예인 사진 수집 → 다중 사진 평균 임베딩 DB 생성
+tools/calibrate_scores.py  # 오프라인: 가족/남남/동일인 코사인 분포 측정 (유사도→% 환산 기준 근거)
+celebrity_db.json          # 연예인 메타데이터 + 512-D 평균 임베딩 (populate 산출물)
 models/
-  face_detection_yunet.onnx    # 얼굴 검출 (git 추적됨 — 강제 add)
-  face_recognition_sface.onnx  # 얼굴 임베딩 (gitignore 대상, 서버에 수동 배치 필요)
+  face_detection_yunet.onnx    # 얼굴 검출 (git 추적 — .gitignore 예외)
+  arcface_w600k_r50.onnx       # 얼굴 임베딩 (git 미추적, 서버에 수동 배치)
+data/                      # 빌드 캐시 (git 미추적): celeb_cache/<QID>/, kin_cache/, build.log
 static/
   index.html               # 단일 페이지 UI (탭 2개 + 크롭/웹캠 모달)
-  js/app.js                # 전역 상태 + 모든 UI 로직 (~1250줄)
+  js/app.js                # 전역 상태 + 모든 UI 로직
   css/style.css            # Tailwind 보조 커스텀 스타일
   samples/                 # 비교 탭 예제 프리셋 이미지
-  celebrities/             # 연예인 사진 캐시 (600x600 JPEG)
+  celebrities/             # 연예인 대표 사진 (얼굴 중심 360x360 JPEG, populate 산출물)
 facematch.service          # systemd user service 정의
 requirements.txt
 ```
@@ -52,15 +58,22 @@ pip install -r requirements.txt
 python app.py            # 또는: uvicorn app:app --host 0.0.0.0 --port 8501
 ```
 
+ArcFace 모델은 저장소에 없으므로 처음 한 번 받아야 합니다 (InsightFace `buffalo_l` 패키지 안의 `w600k_r50.onnx`):
+```bash
+curl -L -o /tmp/buffalo_l.zip https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip
+python -c "import zipfile; zipfile.ZipFile('/tmp/buffalo_l.zip').extract('w600k_r50.onnx', 'models')"
+mv models/w600k_r50.onnx models/arcface_w600k_r50.onnx
+```
+
 | 변수 | 기본값 | 설명 |
 |---|---|---|
 | `LLAMA_SERVER_URL` | `http://127.0.0.1:8081` | Gemma 4 llama-server 주소 |
 | `MODEL_NAME` | `gemma-4-e4b-it-q4km` | 요청 payload의 model 이름 |
 | `HOST` / `PORT` | `0.0.0.0` / `8501` | `python app.py` 실행 시에만 사용 |
 
-- 로컬(Windows)에는 LLM 서버가 없으므로 비교/연예인 기능은 112 서버에서만 실제 동작합니다. 로컬에선 `/api/health`가 `unreachable`로 나오는 것이 정상입니다.
+- 로컬(Windows)에는 LLM 서버가 없습니다. 두 기능 모두 LLM 없이도 동작하며(ArcFace 점수 + 기본 문구), 설명 문장은 112 서버에서만 생성됩니다.
 - LLM을 로컬에서 쓰려면 SSH 터널로 112 서버의 8081을 포워딩한 뒤 `LLAMA_SERVER_URL`을 지정하세요.
-- 자동화 테스트는 없습니다. 변경 검증은 `/api/health`, 예제 프리셋(`/api/samples`)을 이용한 수동 확인으로 합니다.
+- 자동화 테스트는 없습니다. 변경 검증은 예제 프리셋(`/api/samples`)과 연예인 본인 사진 → 본인 1위 여부로 확인합니다.
 
 ---
 
@@ -80,59 +93,65 @@ python app.py            # 또는: uvicorn app:app --host 0.0.0.0 --port 8501
 | POST | `/api/detect-faces` | YuNet(→ Haar 폴백) 얼굴 검출, 1:1 크롭 박스 + 80px 썸네일 반환 |
 | POST | `/api/compare` | multipart 업로드 비교 (프론트 미사용, 외부 호출용) |
 | POST | `/api/compare-json` | base64 JSON 비교 (프론트가 사용) |
-| POST | `/api/find-celebrity` | 닮은 연예인 TOP 3 |
+| POST | `/api/find-celebrity` | 닮은 연예인 TOP 3 (얼굴 미검출 시 400) |
 
-### 4.2 사진 2장 비교 파이프라인 (`execute_face_comparison`)
-1. 모드(`family` 기본 / `celebrity` / `identical`)별 한국어 프롬프트 구성 → 두 이미지와 함께 Gemma 4에 전송 (`temperature 0.05`, timeout 90s)
-2. `extract_json_from_response`로 응답에서 JSON 추출 (think 태그 제거 → 코드블록 → 최외곽 중괄호 → 실패 시 30점 고정 폴백)
-3. **점수 보정**:
-   - 부위별 5개 점수(`eyes, nose, mouth, face_shape, features`) 각각 `calibrate_similarity_score` 적용
-   - 종합 raw = `0.4 × LLM 종합점수 + 0.6 × 가중평균(눈 .25, 코 .20, 입 .20, 얼굴형 .20, 특징 .15)` → 보정
-   - `get_verdict_for_score(score, mode)`로 판정 문구 부여
-4. 에러 매핑: LLM 비정상 응답 502 / 타임아웃 504 / 연결 실패 503 / 기타 500
+### 4.2 얼굴 임베딩 (`face_utils`)
+- `decode_image_bgr`(EXIF 회전 반영) → `detect_faces_yunet`(긴 변 1280px로 축소 검출 후 원본 좌표로 복원) → 가장 큰 얼굴
+- `align_face`: YuNet 5점 랜드마크를 ArcFace 표준 템플릿(112x112)에 similarity transform으로 정렬. YuNet 랜드마크 순서(화면 왼쪽 눈 먼저)는 템플릿 순서와 같습니다.
+- `embed_face`: RGB, (x-127.5)/127.5 정규화 → 512-D → L2 정규화. 코사인 = 내적.
+- **임베딩 모델을 바꾸면 `celebrity_db.json`을 반드시 재생성**해야 합니다. 로드 시 차원이 다른 항목은 버리고 에러 로그를 남깁니다.
 
-> `calibrate_similarity_score`의 구간표(≤40→10~25, 40~50→25~45, 50~65→45~76, 65~85→76~92, >85→92~99)는 "남남 과대채점 방지"를 위해 튜닝된 값입니다. 조정 시 예제 3(남남, 35% 이하)과 예제 1·2(가족, 85% 이상) 기대치를 함께 확인하세요.
+### 4.3 유사도 → % 환산 (`similarity_to_percent`)
+- `SIMILARITY_ANCHORS`의 프로필별 구간 선형 보간: `family`(2장 닮음), `identical`(동일인 판정), `celebrity`(연예인 검색)
+- 기준값은 `tools/calibrate_scores.py`로 측정한 실제 분포(가족 쌍 / 남남 쌍 / 같은 사람의 다른 사진)에서 정했습니다. **임의로 바꾸지 말고, 바꿀 때는 스크립트를 다시 돌려 근거를 확인**하세요.
+- `adjust_part_scores`: LLM 부위별 점수의 **상대 패턴만** 유지하고 수준은 최종 점수에 맞춰 재중심화합니다.
 
-### 4.3 닮은 연예인 파이프라인 (`celebrity_service.execute_celebrity_lookalike`)
-1. 이미지를 768px로 정규화 → Gemma 4에 "안면 형태학 분석 + 한국 연예인 TOP 추천" JSON 요청 (`temperature 0.25`, timeout 45s, `cache_prompt: False`)
-2. **Gemma 실패 시 폴백**: 사용자 SFace 임베딩과 `celebrity_db.json` 임베딩의 코사인 유사도로 순위 산정
-3. 상위 3명에 대해 `resolve_celebrity_image`로 사진 확보:
-   DB 매칭 → 로컬 파일(`<정규화된 이름>.jpg`) → **위키백과(ko→en) 실시간 검색·다운로드·600px 정사각 크롭 후 캐시**
-4. 사진이 있으면 SFace 코사인 유사도로 점수 보정: `bonus = round((sim - 0.25) × 25)`, 최종 62~96으로 클램프
-5. 점수 내림차순 재정렬 후 `top_celebrity`, `candidates`, `all_celebrities`, `face_features` 반환
-- 사진을 못 찾으면 `gong_yoo.jpg`가 대체 이미지로 사용됩니다.
+### 4.4 사진 2장 비교 (`execute_face_comparison`)
+1. 두 사진의 ArcFace 코사인 → `similarity_to_percent` (모드 `identical`이면 identical 프로필, 그 외 family)
+2. Gemma 4 비교 요청(`request_gemma_comparison`). 측정값을 프롬프트에 참고로 넣어 소견 문장이 점수와 모순되지 않게 합니다. Gemma 원점수는 기존 `calibrate_similarity_score`로 보정.
+3. 최종 점수 = `FACE_SCORE_WEIGHT[mode] × ArcFace% + 나머지 × Gemma%` (family/celebrity 0.8, identical 1.0)
+4. 응답 `data.score_breakdown`에 측정값·코사인·LLM 점수·가중치를 담아 프론트가 표시합니다.
+5. **Gemma 장애 시에도 ArcFace만으로 결과를 반환**합니다. 얼굴을 못 찾으면 Gemma 점수만 사용하고 그 사실을 `environmental_factors`에 적습니다. 둘 다 불가하면 기존 에러 매핑(502/503/504).
 
-### 4.4 얼굴 검출 (`detect_faces_in_image`)
+### 4.5 닮은 연예인 (`celebrity_service.execute_celebrity_lookalike`)
+1. 사용자 ArcFace 임베딩 vs DB 전체 평균 임베딩 코사인 → 순위
+2. 성별: 필터 `male`/`female`은 코드에서 강제. `auto`는 최근접 15명의 성별을 유사도 가중 다수결로 추정.
+3. TOP 3 선정 후 `celebrity` 프로필로 % 환산. **후보와 점수는 여기서 확정**됩니다.
+4. Gemma에는 사용자 사진 + 선정된 3명 사진을 주고 얼굴 특징·닮은 이유·부위별 점수만 요청합니다(이름 변경 금지). 실패 시 DB의 `face_type`/`vibe`나 기본 문구로 대체.
+5. DB에 없는 사람은 절대 결과에 나오지 않습니다(실시간 위키 검색·대체 사진 없음).
+
+### 4.6 얼굴 검출 API (`detect_faces_in_image`)
 - EXIF 회전 보정 후 YuNet(score 0.55) → 실패 시 Haar Cascade 폴백
-- 얼굴은 x좌표(왼→오) 순 정렬, 라벨은 `인물 1 (왼쪽)` 식으로 생성
-- `compute_square_face_box`: 얼굴 크기 ×1.65 정사각형, 눈 위치가 위에서 38% 지점에 오도록 배치, 이미지 경계 내 클램프
+- 얼굴은 x좌표(왼→오) 순 정렬, 라벨은 `face_position_label`(`인물 1 (왼쪽)` 등)
+- `compute_square_face_box`(face_utils): 얼굴 크기 ×1.65 정사각형, 눈 위치가 위에서 38% 지점, 이미지 경계 내 클램프
 
 ---
 
 ## 5. 프론트엔드 규칙 (`static/`)
 
-- **Base URL**: `getBaseUrl()`이 경로가 `/facematching`으로 시작하면 prefix를 붙입니다. 모든 `fetch`는 `BASE_URL + '/api/...'` 형태로 호출하세요. 절대경로 하드코딩 금지.
+- **Base URL**: `getBaseUrl()`이 경로가 `/facematching`으로 시작하면 prefix를 붙입니다. 모든 `fetch`는 `BASE_URL + '/api/...'` 형태로 호출하세요.
 - `index.html`은 `style.css`/`app.js`를 **`?v=Date.now()` 캐시 버스팅**으로 동적 로드합니다. 파일명을 바꾸면 이 로더도 수정해야 합니다.
-- 상태는 `app.js` 상단의 전역 변수(`photo1Data`, `photoCelebData`, `currentMode`, `detectedFaces1` 등)로 관리합니다. 사진 대상 식별자는 `1`, `2`, `'celeb'` 세 가지이며, 크롭/웹캠/얼굴 선택 함수는 모두 이 `targetId`를 인자로 받습니다.
-- UI 이벤트는 HTML의 인라인 `onclick="fn()"`으로 연결되어 있으므로, 함수명 변경 시 `index.html`도 함께 수정하세요.
-- 아이콘은 Lucide — DOM을 동적으로 추가한 뒤에는 `lucide.createIcons()`를 호출해야 렌더링됩니다.
-- 이미지 입력: 드래그앤드롭, 파일 선택, `Ctrl+V` 붙여넣기, 웹캠. 업로드 전 `compressImage`(최대 800px)로 압축, 얼굴 자동 검출 후 Cropper.js 1:1 크롭 지원.
-- 현재 UI는 비교 모드를 항상 `family`로 보냅니다. `celebrity`/`identical` 모드는 백엔드에만 남아 있습니다.
+- 상태는 `app.js` 상단 전역 변수로 관리합니다. 사진 대상 식별자는 `1`, `2`, `'celeb'`이며 크롭/웹캠/얼굴 선택 함수는 이 `targetId`를 받습니다.
+- UI 이벤트는 HTML 인라인 `onclick="fn()"`으로 연결되어 있으므로, 함수명 변경 시 `index.html`도 함께 수정하세요.
+- 서버 데이터를 `innerHTML`에 넣을 때는 반드시 `escapeHtml()`을 거칩니다(연예인 이름은 Wikidata 라벨).
+- 아이콘은 Lucide — DOM을 동적으로 추가한 뒤에는 `lucide.createIcons()` 호출.
+- 현재 UI는 비교 모드를 항상 `family`로 보냅니다. `celebrity`/`identical` 모드는 백엔드에만 있습니다.
 - 스타일은 Tailwind 유틸리티 클래스 중심의 다크 테마(slate/indigo/pink 계열, `glass-card`)를 따릅니다.
 
 ---
 
 ## 6. 연예인 DB 관리
 
-- 연예인 추가/수정: `populate_celebrities.py`의 `CELEBRITY_CATALOG`에 항목(`name, query, file, gender, category, face_type, vibe`, 선택적으로 `lang: "en"` 또는 영문 폴백 검색어 `en_query`)을 추가 후 실행
-  ```bash
-  python populate_celebrities.py
-  ```
-  → 누락된 사진만 위키백과에서 다운로드 → 전체 DB(`celebrity_db.json`)를 **재생성(덮어쓰기)** 합니다.
-- `file`은 영문 snake_case(`kim_soo_hyun.jpg`)를 사용합니다. 위키백과 검색어가 모호하면 `query`에 `"(배우)"`, `"(가수)"` 등 동음이의 구분자를 붙입니다.
-- 4KB 이하 파일은 유효하지 않은 이미지로 간주되어 재다운로드 대상입니다.
-- 런타임 on-demand 다운로드는 **한글 파일명**(`김민재.jpg` 등)으로 `static/celebrities/`에 저장됩니다. 이 파일들은 git에 untracked로 쌓이므로, 커밋 여부를 의도적으로 결정하세요(DB에 정식 편입하려면 catalog에 영문 파일명으로 추가).
-- `celebrity_db.json`은 모듈 레벨에서 캐시(`_CACHED_DB`)되므로 DB 갱신 후에는 서비스 재시작이 필요합니다.
+```bash
+python populate_celebrities.py --limit 600 --workers 4   # 진행 로그는 표준출력
+```
+- 후보 = `CELEBRITY_CATALOG` 시드(항상 포함, 손으로 쓴 `face_type`/`vibe` 설명 재사용) + Wikidata의 생존 한국 연예인 중 Commons 카테고리가 있는 사람을 sitelinks(인지도) 순으로 `--limit`명.
+- 사람마다 Commons `deepcat` 검색으로 최대 10장을 받아 `data/celeb_cache/<QID>/`에 캐시합니다. **재실행 시 캐시를 재사용**하므로 증분 빌드가 빠릅니다(완전히 받은 사람만 재사용).
+- 본인 식별은 **여러 사진에 반복 등장하는 얼굴**(ArcFace 코사인 ≥ 0.40)로 합니다. 단체 사진·로고·다른 사람은 자동 제외되고, 일치한 얼굴들의 평균 임베딩을 저장합니다(`n_photos`).
+- 대표 사진은 일치 얼굴 중 크고 전형적인 것을 골라 얼굴 중심으로 크롭해 `static/celebrities/`에 씁니다. 원본 출처는 `photo_source`(Commons 파일 페이지)에 남습니다.
+- **Wikimedia 요청 제한**: 모든 요청은 공유 속도 제한(`MIN_REQUEST_INTERVAL` 0.35초)을 거치고 429의 `Retry-After`를 따릅니다. 병렬 작업을 여러 개 띄우면 429가 나므로 수집 스크립트는 한 번에 하나만 돌리세요.
+- 시드 추가: `CELEBRITY_CATALOG`에 `name, query, file, gender, category, face_type, vibe`(선택: `lang`, `en_query`). `query`는 한국어 위키백과 검색어로 Wikidata 항목을 찾는 데 씁니다.
+- DB 교체 후에는 서비스 재시작이 필요합니다(`load_celebrity_db` 모듈 캐시).
 
 ---
 
@@ -140,35 +159,35 @@ python app.py            # 또는: uvicorn app:app --host 0.0.0.0 --port 8501
 
 - **사용자 노출 문자열(에러 메시지, 판정 문구, 프롬프트)은 한국어**, 코드·로그·docstring은 영어를 기본으로 합니다.
 - 로깅은 `logging.getLogger("facematch")` / `"facematch.celebrity"`를 사용합니다. `print`는 오프라인 스크립트에서만.
-- 이미지 처리 공통 규칙: `ImageOps.exif_transpose` → RGB 변환 → 긴 변 768px 리사이즈 → JPEG q88 → data URL.
-- 여러 모듈에서 쓰는 로직(이미지 정규화, JSON 추출, SFace 임베딩, 위키백과 다운로드, 모델 경로)은 **`face_utils.py`에만** 두고 import 해서 쓰세요. 복사해서 중복 구현하지 않습니다.
+- 여러 모듈에서 쓰는 로직(이미지 정규화, 얼굴 검출·임베딩, 점수 환산, JSON 추출, 모델 경로)은 **`face_utils.py`에만** 두고 import 해서 쓰세요.
   - `app.py`의 `process_image_to_base64` / `extract_json_from_response`는 공용 함수를 감싸 HTTP 400 변환과 30점 폴백만 추가하는 얇은 래퍼입니다.
-- LLM 응답은 절대 신뢰하지 말고 항상 파싱 폴백 + 점수 `int(round(float(x)))` 변환 + 범위 클램프를 거치세요.
+- LLM 응답은 절대 신뢰하지 말고 항상 파싱 폴백 + 숫자 변환 + 범위 클램프를 거치세요. LLM이 실패해도 기능이 동작하도록 기본 문구를 둡니다.
 - LLM 프롬프트는 JSON 스키마를 문자열로 명시하고 "JSON으로만 출력"을 강제하는 기존 스타일을 유지합니다.
-- `celebrity_service`는 `app.py`에서 **엔드포인트 내부에서 지연 import** 합니다(순환 의존 없음, 모듈 로딩 비용 분리 목적). 이 구조를 유지하세요.
+- `celebrity_service`는 `app.py`에서 **엔드포인트 내부에서 지연 import** 합니다. 이 구조를 유지하세요.
 - 커밋 메시지: `feat:` / `fix:` 접두사 + 한국어 또는 영어 요약 (기존 히스토리 스타일).
 
 ---
 
 ## 8. 배포 (112 서버)
 
-- 호스트: `192.168.219.112` (SSH 별칭 `local-ai-server`), GPU RTX 2070 SUPER
-- 배포 경로: `/home/lmo0317/apps/facematch` (venv: `venv/`)
+- 호스트: `192.168.219.112` (SSH 별칭 `local-ai-server`), GPU RTX 2070 SUPER (Gemma 전용, ArcFace는 CPU)
+- 배포 경로: `/home/lmo0317/apps/facematch` (venv: `venv/`, git 저장소 아님)
 - 서비스: `facematch.service` (systemd **user** service), `llama-gemma4.service`에 의존
 - 외부 접근: 리버스 프록시 `https://minohlee.mooo.com/facematching/` → `:8501`
-- 별도 배포 스크립트는 없습니다. 파일 반영 후 재시작:
+- 별도 배포 스크립트는 없습니다. 파일을 복사(scp)한 뒤 재시작합니다. `data/`(빌드 캐시)는 올리지 않습니다.
   ```bash
   ssh local-ai-server "systemctl --user restart facematch.service"
   ssh local-ai-server "journalctl --user -u facematch.service -f"
   ```
-- 서버에 `models/face_recognition_sface.onnx`가 있어야 SFace 보정/폴백이 동작합니다(없으면 조용히 비활성화됨).
+- 서버에 `models/arcface_w600k_r50.onnx`와 venv의 `onnxruntime`이 있어야 합니다. 없으면 두 기능 모두 얼굴 인식 점수를 낼 수 없습니다.
 
 ---
 
 ## 9. 알려진 이슈 / 주의사항
 
-- OpenCV는 서버와 동일하게 `opencv-python-headless`를 사용합니다. 같은 venv에 `opencv-python`을 함께 설치하면 `cv2`가 충돌하니 둘 중 하나만 설치하세요.
-- `.gitignore`는 `models/*.onnx`를 제외하되 YuNet만 예외로 추적합니다. SFace 모델은 저장소에 없습니다.
-- `CELEBRITY_CATALOG`는 `file` 기준으로 중복 없이 유지하세요(DB 빌드 시 중복은 경고 후 건너뜀). 한국어 위키 검색이 실패하는 인물은 별도 항목 대신 `en_query` 필드로 영문 폴백 검색어를 지정합니다.
+- OpenCV는 서버와 동일하게 `opencv-python-headless`를 사용합니다. 같은 venv에 `opencv-python`을 함께 설치하면 `cv2`가 충돌합니다.
+- InsightFace 사전학습 모델(`w600k_r50`)은 **비상업·연구용 라이선스**입니다. 상업 서비스로 전환 시 교체를 검토하세요.
+- 연예인 사진은 Wikimedia Commons(CC 라이선스) 출처입니다. 출처 URL은 DB의 `photo_source`에 있습니다.
+- ArcFace는 "같은 사람인가"를 학습한 모델이라, 성별·나이 차가 큰 가족(엄마-아들 등)은 실제 닮음보다 코사인이 낮게 나오는 경향이 있습니다.
 - CORS가 `allow_origins=["*"]`로 전체 개방되어 있습니다.
 - `/api/samples`의 이미지 경로는 prefix 없는 `/static/...`이며, 프론트에서 `BASE_URL`을 붙여 사용합니다.
