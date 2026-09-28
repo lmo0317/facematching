@@ -1,13 +1,11 @@
 import os
 import io
-import re
-import json
 import base64
 import logging
 from typing import Optional, List, Dict, Any, Tuple
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -15,6 +13,8 @@ from PIL import Image, ImageOps
 import httpx
 import cv2
 import numpy as np
+
+from face_utils import YUNET_PATH, compute_square_face_box, image_bytes_to_data_url, extract_json_block, strip_thought_tags
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -43,47 +43,22 @@ app.add_middleware(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 SAMPLES_DIR = os.path.join(STATIC_DIR, "samples")
-MODELS_DIR = os.path.join(BASE_DIR, "models")
 
 os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(SAMPLES_DIR, exist_ok=True)
-os.makedirs(MODELS_DIR, exist_ok=True)
-
-YUNET_MODEL_PATH = os.path.join(MODELS_DIR, "face_detection_yunet.onnx")
 
 # Mount static folder (supports both /static and /facematching/static)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/facematching/static", StaticFiles(directory=STATIC_DIR), name="static_facematching")
 
 
-def compute_square_face_box(fx: int, fy: int, fw: int, fh: int, img_w: int, img_h: int, landmarks: Optional[List[float]] = None) -> Tuple[int, int, int, int]:
-    """Calculate balanced, square (1:1) bounding box centered on head with natural hair and chin margins."""
-    face_dim = max(fw, fh)
-    # Headshot crop: comfortable margin for hair headroom, ears, and chin/collar
-    crop_size = int(face_dim * 1.65)
-    crop_size = min(crop_size, img_w, img_h)
-    crop_size = max(crop_size, 30)
-
-    if landmarks is not None and len(landmarks) >= 4:
-        # Landmarks: right eye (rx, ry), left eye (lx, ly)
-        rx, ry, lx, ly = landmarks[0:4]
-        eye_cx = (rx + lx) / 2.0
-        eye_cy = (ry + ly) / 2.0
-        cx = int(eye_cx)
-        # Position eyes at ~38% from the top of the crop for balanced portrait framing
-        py = int(eye_cy - int(crop_size * 0.38))
-        px = int(cx - crop_size // 2)
-    else:
-        cx = fx + fw // 2
-        cy = fy + int(fh * 0.45)
-        px = cx - crop_size // 2
-        py = cy - int(crop_size * 0.45)
-
-    # Strictly clamp within image boundary while preserving 1:1 square ratio
-    px = max(0, min(img_w - crop_size, px))
-    py = max(0, min(img_h - crop_size, py))
-
-    return px, py, crop_size, crop_size
+def face_position_label(index: int, count: int) -> str:
+    """Korean label for a face sorted left-to-right, e.g. '인물 1 (왼쪽)'."""
+    if count == 2:
+        return f"인물 {index + 1} ({['왼쪽', '오른쪽'][index]})"
+    if count == 3:
+        return f"인물 {index + 1} ({['왼쪽', '중앙', '오른쪽'][index]})"
+    return f"인물 {index + 1}"
 
 
 def detect_faces_in_image(image_bytes: bytes) -> List[Dict[str, Any]]:
@@ -99,10 +74,10 @@ def detect_faces_in_image(image_bytes: bytes) -> List[Dict[str, Any]]:
         img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
         faces = None
-        if os.path.exists(YUNET_MODEL_PATH):
+        if os.path.exists(YUNET_PATH):
             try:
                 detector = cv2.FaceDetectorYN.create(
-                    model=YUNET_MODEL_PATH,
+                    model=YUNET_PATH,
                     config="",
                     input_size=(w, h),
                     score_threshold=0.55,
@@ -115,41 +90,12 @@ def detect_faces_in_image(image_bytes: bytes) -> List[Dict[str, Any]]:
                 logger.warning(f"YuNet detection warning: {e}")
                 faces = None
 
-        detected = []
+        # Normalize detector output to (x, y, w, h, confidence, landmarks)
+        raw_faces: List[Tuple[int, int, int, int, float, Optional[List[float]]]] = []
         if faces is not None and len(faces) > 0:
-            sorted_faces = sorted(faces, key=lambda x: x[0])
-            count = len(sorted_faces)
-            for i, f in enumerate(sorted_faces):
-                fx, fy, fw, fh = map(int, f[0:4])
-                score = float(f[-1])
+            for f in faces:
                 landmarks = [float(x) for x in f[4:14]] if len(f) >= 14 else None
-
-                px, py, pw, ph = compute_square_face_box(fx, fy, fw, fh, w, h, landmarks)
-
-                thumb = img_pil.crop((px, py, px + pw, py + ph))
-                thumb = thumb.resize((80, 80), Image.Resampling.LANCZOS)
-                buf = io.BytesIO()
-                thumb.save(buf, format="JPEG", quality=85)
-                thumb_b64 = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
-
-                if count == 1:
-                    label = "인물 1"
-                elif count == 2:
-                    label = "인물 1 (왼쪽)" if i == 0 else "인물 2 (오른쪽)"
-                elif count == 3:
-                    pos = ["왼쪽", "중앙", "오른쪽"][i]
-                    label = f"인물 {i+1} ({pos})"
-                else:
-                    label = f"인물 {i+1}"
-
-                detected.append({
-                    "id": i + 1,
-                    "label": label,
-                    "box": {"x": fx, "y": fy, "width": fw, "height": fh},
-                    "padded_box": {"x": px, "y": py, "width": pw, "height": ph},
-                    "confidence": round(score, 2),
-                    "thumbnail": thumb_b64
-                })
+                raw_faces.append((*map(int, f[0:4]), float(f[-1]), landmarks))
         else:
             # Fallback to Haar Cascade
             try:
@@ -157,27 +103,31 @@ def detect_faces_in_image(image_bytes: bytes) -> List[Dict[str, Any]]:
                 face_cascade = cv2.CascadeClassifier(cascade_path)
                 gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
                 haar_faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
-                if len(haar_faces) > 0:
-                    sorted_faces = sorted(haar_faces, key=lambda x: x[0])
-                    for i, (fx, fy, fw, fh) in enumerate(sorted_faces):
-                        px, py, pw, ph = compute_square_face_box(int(fx), int(fy), int(fw), int(fh), w, h)
-
-                        thumb = img_pil.crop((px, py, px + pw, py + ph))
-                        thumb = thumb.resize((80, 80), Image.Resampling.LANCZOS)
-                        buf = io.BytesIO()
-                        thumb.save(buf, format="JPEG", quality=85)
-                        thumb_b64 = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
-
-                        detected.append({
-                            "id": i + 1,
-                            "label": f"인물 {i+1}",
-                            "box": {"x": int(fx), "y": int(fy), "width": int(fw), "height": int(fh)},
-                            "padded_box": {"x": px, "y": py, "width": pw, "height": ph},
-                            "confidence": 0.85,
-                            "thumbnail": thumb_b64
-                        })
+                for (fx, fy, fw, fh) in haar_faces:
+                    raw_faces.append((int(fx), int(fy), int(fw), int(fh), 0.85, None))
             except Exception as e:
                 logger.warning(f"Haar Cascade fallback warning: {e}")
+
+        raw_faces.sort(key=lambda x: x[0])
+        count = len(raw_faces)
+        detected = []
+        for i, (fx, fy, fw, fh, score, landmarks) in enumerate(raw_faces):
+            px, py, pw, ph = compute_square_face_box(fx, fy, fw, fh, w, h, landmarks)
+
+            thumb = img_pil.crop((px, py, px + pw, py + ph))
+            thumb = thumb.resize((80, 80), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            thumb.save(buf, format="JPEG", quality=85)
+            thumb_b64 = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+
+            detected.append({
+                "id": i + 1,
+                "label": face_position_label(i, count),
+                "box": {"x": fx, "y": fy, "width": fw, "height": fh},
+                "padded_box": {"x": px, "y": py, "width": pw, "height": ph},
+                "confidence": round(score, 2),
+                "thumbnail": thumb_b64
+            })
 
         return detected
     except Exception as e:
@@ -186,60 +136,20 @@ def detect_faces_in_image(image_bytes: bytes) -> List[Dict[str, Any]]:
 
 
 def process_image_to_base64(image_bytes: bytes, max_dim: int = 768) -> str:
-    """Validate, orient and resize image, then convert to base64 data URL."""
+    """Normalize an uploaded image into a JPEG data URL, mapping failures to HTTP 400."""
     try:
-        img = Image.open(io.BytesIO(image_bytes))
-        # Handle EXIF orientation
-        img = ImageOps.exif_transpose(img)
-
-        # Convert to RGB (handles RGBA, Palette, Grayscale)
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-
-        # Resize if dimensions exceed max_dim
-        w, h = img.size
-        if max(w, h) > max_dim:
-            if w > h:
-                new_w = max_dim
-                new_h = int(h * (max_dim / w))
-            else:
-                new_h = max_dim
-                new_w = int(w * (max_dim / h))
-            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-
-        buffered = io.BytesIO()
-        img.save(buffered, format="JPEG", quality=88)
-        encoded = base64.b64encode(buffered.getvalue()).decode("utf-8")
-        return f"data:image/jpeg;base64,{encoded}"
+        return image_bytes_to_data_url(image_bytes, max_dim)
     except Exception as e:
         logger.error(f"Image processing error: {e}")
         raise HTTPException(status_code=400, detail=f"이미지 처리 중 오류가 발생했습니다: {str(e)}")
 
 
 def extract_json_from_response(text: str) -> Dict[str, Any]:
-    """Robust extraction of JSON from model response text."""
-    # Remove thought tags if present
-    cleaned = re.sub(r"<channel>thought.*?</channel>", "", text, flags=re.DOTALL)
-    cleaned = re.sub(r"<\|think\|>.*?</turn>", "", cleaned, flags=re.DOTALL)
-    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL)
+    """Robust extraction of JSON from model response text, with a low-score fallback structure."""
+    parsed = extract_json_block(text)
+    if parsed is not None:
+        return parsed
 
-    # 1. Look for ```json ... ``` blocks
-    json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
-    if json_match:
-        try:
-            return json.loads(json_match.group(1))
-        except Exception:
-            pass
-
-    # 2. Look for outermost curly braces { ... }
-    brace_match = re.search(r"(\{.*\})", cleaned, re.DOTALL)
-    if brace_match:
-        try:
-            return json.loads(brace_match.group(1))
-        except Exception:
-            pass
-
-    # 3. Fallback: Parse line by line or construct basic structure
     logger.warning("Failed to parse strict JSON, building fallback response from raw text")
     return {
         "similarity_score": 30,
@@ -255,7 +165,7 @@ def extract_json_from_response(text: str) -> Dict[str, Any]:
         "similarities": ["세부 내용은 종합 분석을 확인하세요."],
         "differences": ["세부 내용은 종합 분석을 확인하세요."],
         "environmental_factors": "나이, 성별, 조명 및 각도 차이를 감안하여 분석함",
-        "comprehensive_analysis": cleaned.strip()
+        "comprehensive_analysis": strip_thought_tags(text).strip()
     }
 
 
@@ -441,7 +351,7 @@ async def detect_faces_endpoint(req: DetectFacesRequest):
 
     try:
         image_bytes = base64.b64decode(data)
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=400, detail="유효한 Base64 이미지가 아닙니다.")
 
     faces = detect_faces_in_image(image_bytes)

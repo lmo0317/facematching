@@ -6,47 +6,32 @@ Celebrity Lookalike Service (정밀 유사 연예인 탐색 서비스)
 """
 
 import os
-import io
 import re
 import json
 import base64
 import logging
-import urllib.request
-import urllib.parse
 from typing import Dict, Any, List, Optional, Tuple
-import cv2
 import numpy as np
-from PIL import Image, ImageOps
 import httpx
+
+from face_utils import (
+    image_bytes_to_data_url,
+    extract_json_block,
+    extract_face_embedding,
+    download_wikipedia_portrait,
+)
 
 logger = logging.getLogger("facematch.celebrity")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CELEB_DIR = os.path.join(BASE_DIR, "static", "celebrities")
-MODELS_DIR = os.path.join(BASE_DIR, "models")
 DB_PATH = os.path.join(BASE_DIR, "celebrity_db.json")
-
-YUNET_PATH = os.path.join(MODELS_DIR, "face_detection_yunet.onnx")
-SFACE_PATH = os.path.join(MODELS_DIR, "face_recognition_sface.onnx")
+CELEB_URL_PREFIX = "/facematching/static/celebrities"
+FALLBACK_PHOTO_URL = f"{CELEB_URL_PREFIX}/gong_yoo.jpg"
 
 os.makedirs(CELEB_DIR, exist_ok=True)
 
-HEADERS = {
-    "User-Agent": "FaceMatchApp/2.0 (https://minohlee.mooo.com; admin@minohlee.mooo.com)"
-}
-
 _CACHED_DB: Optional[List[Dict[str, Any]]] = None
-_SFACE_RECOGNIZER = None
-
-
-def get_sface_recognizer():
-    global _SFACE_RECOGNIZER
-    if _SFACE_RECOGNIZER is None and os.path.exists(SFACE_PATH):
-        try:
-            _SFACE_RECOGNIZER = cv2.FaceRecognizerSF.create(SFACE_PATH, "")
-        except Exception as e:
-            logger.warning(f"Failed to create SFace recognizer: {e}")
-    return _SFACE_RECOGNIZER
 
 
 def load_celebrity_db() -> List[Dict[str, Any]]:
@@ -65,59 +50,6 @@ def load_celebrity_db() -> List[Dict[str, Any]]:
     return []
 
 
-def process_image_to_base64(image_bytes: bytes, max_dim: int = 768) -> str:
-    """Validate, orient and resize image, then convert to base64 data URL."""
-    img = Image.open(io.BytesIO(image_bytes))
-    img = ImageOps.exif_transpose(img)
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-
-    w, h = img.size
-    if max(w, h) > max_dim:
-        if w > h:
-            new_w = max_dim
-            new_h = int(h * (max_dim / w))
-        else:
-            new_h = max_dim
-            new_w = int(w * (max_dim / h))
-        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-
-    buffered = io.BytesIO()
-    img.save(buffered, format="JPEG", quality=88)
-    encoded = base64.b64encode(buffered.getvalue()).decode("utf-8")
-    return f"data:image/jpeg;base64,{encoded}"
-
-
-def extract_face_embedding(image_bytes: bytes) -> Optional[np.ndarray]:
-    """Extract 128-D normalized SFace feature vector from primary face."""
-    try:
-        recognizer = get_sface_recognizer()
-        if recognizer is None or not os.path.exists(YUNET_PATH):
-            return None
-
-        img_np = np.frombuffer(image_bytes, np.uint8)
-        img_bgr = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
-        if img_bgr is None:
-            return None
-
-        h, w = img_bgr.shape[:2]
-        detector = cv2.FaceDetectorYN.create(YUNET_PATH, "", (w, h), 0.45, 0.3, 10)
-        _, faces = detector.detect(img_bgr)
-        if faces is None or len(faces) == 0:
-            return None
-
-        best_face = max(faces, key=lambda f: f[2] * f[3])
-        aligned = recognizer.alignCrop(img_bgr, best_face)
-        feat = recognizer.feature(aligned)
-        norm = np.linalg.norm(feat)
-        if norm > 0:
-            return (feat / norm).flatten()
-        return None
-    except Exception as e:
-        logger.warning(f"Error extracting face embedding: {e}")
-        return None
-
-
 def normalize_celeb_name(name: str) -> str:
     cleaned = re.sub(r"\(.*?\)", "", name)
     cleaned = re.sub(r"^(배우|가수|아이돌|개그맨|방송인|모델|선수)\s*", "", cleaned)
@@ -125,12 +57,16 @@ def normalize_celeb_name(name: str) -> str:
     return cleaned.strip()
 
 
+def _is_valid_photo(path: str) -> bool:
+    return os.path.exists(path) and os.path.getsize(path) > 4000
+
+
 def resolve_celebrity_image(name: str) -> Optional[Tuple[str, str]]:
     """
     Get (web_url, local_path) for celebrity image.
     1. Checks celebrity_db.json
     2. Checks existing local file matching name
-    3. Searches Wikipedia/Wikimedia on-demand, downloads, center-crops to square, caches, and returns.
+    3. Searches Wikipedia (ko, then en), downloads, center-crops to square, caches, and returns.
     """
     norm = normalize_celeb_name(name)
     db = load_celebrity_db()
@@ -139,76 +75,24 @@ def resolve_celebrity_image(name: str) -> Optional[Tuple[str, str]]:
     for item in db:
         if item["name"] == norm or norm in item["name"]:
             local_path = os.path.join(CELEB_DIR, item["filename"])
-            if os.path.exists(local_path) and os.path.getsize(local_path) > 4000:
+            if _is_valid_photo(local_path):
                 return item["photo_url"], local_path
 
     # 2. Search local files
     safe_slug = re.sub(r"[^a-zA-Z0-9가-힣_]", "_", norm) + ".jpg"
     local_path = os.path.join(CELEB_DIR, safe_slug)
-    if os.path.exists(local_path) and os.path.getsize(local_path) > 4000:
-        return f"/facematching/static/celebrities/{safe_slug}", local_path
+    web_url = f"{CELEB_URL_PREFIX}/{safe_slug}"
+    if _is_valid_photo(local_path):
+        return web_url, local_path
 
     # 3. Search Wikipedia (Korean then English)
-    for lang, q in [("ko", norm), ("en", norm)]:
+    for lang in ("ko", "en"):
         try:
-            encoded = urllib.parse.quote(q)
-            url = f"https://{lang}.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch={encoded}&gsrlimit=1&prop=pageimages&piprop=original&format=json"
-            req = urllib.request.Request(url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=6) as r:
-                data = json.loads(r.read().decode("utf-8"))
-                pages = data.get("query", {}).get("pages", {})
-                img_url = None
-                for pid, info in pages.items():
-                    if "original" in info and "source" in info["original"]:
-                        img_url = info["original"]["source"]
-                        break
-
-                if img_url:
-                    img_req = urllib.request.Request(img_url, headers=HEADERS)
-                    with urllib.request.urlopen(img_req, timeout=10) as ir:
-                        raw_bytes = ir.read()
-
-                    with Image.open(io.BytesIO(raw_bytes)) as img:
-                        img = img.convert("RGB")
-                        w, h = img.size
-                        min_dim = min(w, h)
-                        left = (w - min_dim) // 2
-                        top = max(0, (h - min_dim) // 3)
-                        right = left + min_dim
-                        bottom = top + min_dim
-                        if bottom > h:
-                            top = h - min_dim
-                            bottom = h
-                        cropped = img.crop((left, top, right, bottom)).resize((600, 600), Image.Resampling.LANCZOS)
-                        cropped.save(local_path, format="JPEG", quality=85, optimize=True)
-
-                    logger.info(f"Downloaded on-demand celebrity photo for {norm} -> {safe_slug}")
-                    return f"/facematching/static/celebrities/{safe_slug}", local_path
+            if download_wikipedia_portrait(norm, lang, local_path, timeout=6):
+                logger.info(f"Downloaded on-demand celebrity photo for {norm} -> {safe_slug}")
+                return web_url, local_path
         except Exception as e:
             logger.warning(f"On-demand image search failed for {norm} ({lang}): {e}")
-
-    return None
-
-
-def extract_json_safe(content: str) -> Optional[Dict[str, Any]]:
-    """Clean LLM output and parse JSON."""
-    cleaned = re.sub(r"<channel>thought.*?</channel>", "", content, flags=re.DOTALL)
-    cleaned = re.sub(r"<\|think\|>.*?</turn>", "", cleaned, flags=re.DOTALL)
-    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL)
-
-    code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
-    if code_block:
-        try:
-            return json.loads(code_block.group(1))
-        except Exception:
-            pass
-
-    outer = re.search(r"(\{.*\})", cleaned, re.DOTALL)
-    if outer:
-        try:
-            return json.loads(outer.group(1))
-        except Exception:
-            pass
 
     return None
 
@@ -231,16 +115,17 @@ async def execute_celebrity_lookalike(
     if "," in data_str:
         data_str = data_str.split(",", 1)[1]
     raw_bytes = base64.b64decode(data_str)
-    processed_b64 = process_image_to_base64(raw_bytes, max_dim=768)
+    processed_b64 = image_bytes_to_data_url(raw_bytes, max_dim=768)
+    user_feat = extract_face_embedding(raw_bytes)
 
     # 2. Construct Gender Constraint
     gender_instruction = ""
     if gender_filter == "male":
-        gender_instruction = "【성별 필터 필수】: 사용자가 '남성 연예인' 매칭을 요청했습니다. 1위부터 5위까지 반드시 한국 '남성' 연예인(배우, 가수, 방송인 등) 중에서만 선정하세요.\n"
+        gender_instruction = "【성별 필터 필수】: 사용자가 '남성 연예인' 매칭을 요청했습니다. 1위부터 3위까지 반드시 한국 '남성' 연예인(배우, 가수, 방송인 등) 중에서만 선정하세요.\n"
     elif gender_filter == "female":
-        gender_instruction = "【성별 필터 필수】: 사용자가 '여성 연예인' 매칭을 요청했습니다. 1위부터 5위까지 반드시 한국 '여성' 연예인(배우, 가수, 방송인 등) 중에서만 선정하세요.\n"
+        gender_instruction = "【성별 필터 필수】: 사용자가 '여성 연예인' 매칭을 요청했습니다. 1위부터 3위까지 반드시 한국 '여성' 연예인(배우, 가수, 방송인 등) 중에서만 선정하세요.\n"
     else:
-        gender_instruction = "【성별 필터】: 사용자의 실제 성별과 연령대를 관찰하여 가장 자연스러운 한국 연예인 중에서 1위부터 5위까지 선정하세요.\n"
+        gender_instruction = "【성별 필터】: 사용자의 실제 성별과 연령대를 관찰하여 가장 자연스러운 한국 연예인 중에서 1위부터 3위까지 선정하세요.\n"
 
     # 3. Vision Archetype Prompt
     archetype_prompt = (
@@ -256,7 +141,7 @@ async def execute_celebrity_lookalike(
         "   - 동물상 / 분위기 (강아지상, 공룡상, 곰상, 두부상, 여우상, 사슴상, 토끼상, 고양이상 등)\n\n"
         "2. [현실적이고 정밀한 닮은꼴 연예인 선정]:\n"
         "   - 단순히 인기 많은 유명 배우를 아무렇게나 찍지 마십시오!\n"
-        "   - 실제 사진 속 인물의 '얼굴형, 눈매 형태(쌍꺼풀 유무), 하관 골격, 연령대, 고유 분위기'가 실제로 일치하는 현실적인 한국 연예인 TOP 5를 선정하세요.\n"
+        "   - 실제 사진 속 인물의 '얼굴형, 눈매 형태(쌍꺼풀 유무), 하관 골격, 연령대, 고유 분위기'가 실제로 일치하는 현실적인 한국 연예인 TOP 3를 선정하세요.\n"
         "   - 1위(가장 높은 싱크로율 78~92%), 2위(후보 72~85%), 3위(후보 65~79%)\n"
         "   - 1위 연예인은 눈(eyes), 코(nose), 입(mouth), 얼굴형(face_shape), 분위기(features)의 세부 싱크로율(0~100)을 부여하세요.\n\n"
         "반드시 다음 JSON 형식으로만 순수하게 출력하세요:\n"
@@ -336,14 +221,13 @@ async def execute_celebrity_lookalike(
             if resp.status_code == 200:
                 result_json = resp.json()
                 content = result_json["choices"][0]["message"]["content"]
-                gemma_data = extract_json_safe(content)
+                gemma_data = extract_json_block(content)
     except Exception as e:
         logger.warning(f"Gemma 4 archetype call failed: {e}")
 
     # Fallback to SFace database ranking if Gemma failed
     if not gemma_data or not gemma_data.get("recommended_celebrities"):
         logger.warning("Gemma archetype failed, falling back to SFace database")
-        user_feat = extract_face_embedding(raw_bytes)
         db = load_celebrity_db()
         filtered_db = [c for c in db if gender_filter in ["auto", c.get("gender")]] or db
 
@@ -385,12 +269,10 @@ async def execute_celebrity_lookalike(
     recs = gemma_data.get("recommended_celebrities", [])
     formatted_celebs = []
 
-    user_feat = extract_face_embedding(raw_bytes)
-
     for idx, c in enumerate(recs[:3], start=1):
         c_name = c.get("name", "연예인")
         resolved = resolve_celebrity_image(c_name)
-        photo_url = resolved[0] if resolved else f"/facematching/static/celebrities/gong_yoo.jpg"
+        photo_url = resolved[0] if resolved else FALLBACK_PHOTO_URL
         local_path = resolved[1] if resolved else None
 
         # Clean raw similarity score

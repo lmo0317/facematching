@@ -1,25 +1,60 @@
+"""
+Build celebrity_db.json: Korean celebrities with a multi-photo ArcFace embedding each.
+
+1. Candidates = seed CELEBRITY_CATALOG below (hand-written descriptions) + living South Korean
+   entertainers from Wikidata that have a Wikimedia Commons category, ranked by Wikipedia sitelinks.
+2. Up to PHOTOS_PER_PERSON photos per person are pulled from Commons (deepcat search) and cached
+   under data/celeb_cache/<QID>/.
+3. The person's face is identified by consensus: the face that recurs across their photos wins,
+   so group shots, logos and other people are discarded. Matching faces are averaged into one
+   normalized embedding.
+4. A face-centered square display photo is written to static/celebrities/.
+
+Usage: python populate_celebrities.py [--limit 600] [--workers 4]
+Requires models/face_detection_yunet.onnx and models/arcface_w600k_r50.onnx.
+"""
+
 import os
-import urllib.request
-import urllib.parse
+import re
 import json
 import time
-import io
-import cv2
+import argparse
+import threading
+import urllib.request
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import numpy as np
 from PIL import Image
 
+from face_utils import (
+    ARCFACE_PATH, YUNET_PATH, HTTP_HEADERS,
+    compute_square_face_box, decode_image_bgr, detect_faces_yunet, embed_face,
+)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CELEB_DIR = os.path.join(BASE_DIR, "static", "celebrities")
-MODELS_DIR = os.path.join(BASE_DIR, "models")
+CACHE_DIR = os.path.join(BASE_DIR, "data", "celeb_cache")
 DB_PATH = os.path.join(BASE_DIR, "celebrity_db.json")
 
+PHOTOS_PER_PERSON = 10
+THUMB_WIDTH = 960
+MIN_FACE_PX = 60
+SAME_PERSON_COS = 0.40   # ArcFace: different people rarely exceed ~0.3
+DISPLAY_SIZE = 360
+
+GENDER_QIDS = {"Q6581097": "male", "Q6581072": "female"}
+OCCUPATION_CATEGORY = [  # first match wins
+    ({"Q177220", "Q488205"}, "가수"),
+    ({"Q33999", "Q10800557", "Q10798782"}, "배우"),
+    ({"Q947873", "Q245068"}, "방송인"),
+    ({"Q4610556"}, "모델"),
+]
+
 os.makedirs(CELEB_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
 
-HEADERS = {
-    "User-Agent": "FaceMatchCelebrityLibrary/2.0 (https://minohlee.mooo.com; admin@minohlee.mooo.com)"
-}
-
-# 100 Representative Korean Celebrities across diverse facial structures
+# Hand-picked seeds: always included, and their descriptions are reused in result text.
 CELEBRITY_CATALOG = [
     # --- MEN ---
     # 조각 / 정석 미남형
@@ -50,7 +85,7 @@ CELEBRITY_CATALOG = [
     {"name": "류준열", "query": "류준열", "file": "ryu_jun_yeol.jpg", "gender": "male", "category": "배우", "face_type": "독보적인 무쌍 눈매와 시크한 매력", "vibe": "동양적인 매력이 돋보이는 날렵한 눈매와 트렌디한 마스크"},
     {"name": "손석구", "query": "손석구", "file": "son_suk_ku.jpg", "gender": "male", "category": "배우", "face_type": "치명적인 나른한 눈빛의 여우·늑대상", "vibe": "무쌍의 깊은 눈매, 날렵한 턱선과 섹시하고 거친 아우라"},
     {"name": "김우빈", "query": "김우빈", "file": "kim_woo_bin.jpg", "gender": "male", "category": "배우", "face_type": "카리스마 넘치는 대표 공룡상", "vibe": "짙은 눈썹, 강렬한 T존과 시원시원한 입매"},
-    {"name": "이도현", "query": "이도현 (배우)", "file": "lee_do_hyun.jpg", "gender": "male", "category": "배우", "face_type": "매력적인 입꼬리와 맑고 깊은 눈", "vibe": "청량한 소년미와 성숙한 카리스마가 공존하는 마스크"},
+    {"name": "이도현", "query": "이도현 (배우)", "en_query": "Lee Do-hyun", "file": "lee_do_hyun.jpg", "gender": "male", "category": "배우", "face_type": "매력적인 입꼬리와 맑고 깊은 눈", "vibe": "청량한 소년미와 성숙한 카리스마가 공존하는 마스크"},
 
     # 듬직 / 선 굵은 카리스마 / 상남자형
     {"name": "이정재", "query": "이정재", "file": "lee_jung_jae.jpg", "gender": "male", "category": "배우", "face_type": "매력적인 광대와 기품 있는 미소", "vibe": "고급스럽고 중후한 매력, 웃을 때 번지는 눈웃음과 턱선"},
@@ -69,8 +104,6 @@ CELEBRITY_CATALOG = [
     {"name": "기안84", "query": "기안84", "file": "kian84.jpg", "gender": "male", "category": "방송인", "face_type": "날것 그대로의 순수하고 호탕한 인상", "vibe": "꾸밈없는 담백한 눈매와 시원털털한 미소"},
     {"name": "손흥민", "query": "손흥민", "file": "son_heung_min.jpg", "gender": "male", "category": "스포츠", "face_type": "기분 좋아지는 반달 눈웃음의 승부사", "vibe": "동양적인 매력의 무쌍 눈매와 건강하고 활기찬 에너지"},
     {"name": "임영웅", "query": "임영웅", "file": "lim_young_woong.jpg", "gender": "male", "category": "가수", "face_type": "따뜻하고 훈훈한 국민 힐러상", "vibe": "선한 눈망울과 차분한 입매, 신뢰와 위로를 주는 인상"},
-    {"name": "황정민", "query": "황정민", "file": "hwang_jung_min.jpg", "gender": "male", "category": "배우", "face_type": "사람 냄새 나는 깊은 마스크", "vibe": "진솔한 눈매와 친근한 주름, 진정성 넘치는 인상"},
-    {"name": "이도현", "query": "Lee Do-hyun", "lang": "en", "file": "lee_do_hyun.jpg", "gender": "male", "category": "배우", "face_type": "매력적인 입꼬리와 맑고 깊은 눈", "vibe": "청량한 소년미와 성숙한 카리스마가 공존하는 마스크"},
     {"name": "김종국", "query": "김종국 (가수)", "file": "kim_jong_kook.jpg", "gender": "male", "category": "가수", "face_type": "호랑이상 귀여운 눈웃음", "vibe": "작고 매력적인 눈웃음과 듬직한 피지컬의 반전 매력"},
     {"name": "비", "query": "비 (가수)", "file": "rain.jpg", "gender": "male", "category": "가수", "face_type": "원조 매력 무쌍 눈매와 섹시한 턱선", "vibe": "날렵한 무쌍 눈매, 시원한 콧날과 독보적인 무대 아우라"},
     {"name": "문세윤", "query": "문세윤", "file": "moon_se_yoon.jpg", "gender": "male", "category": "방송인", "face_type": "푸근하고 복스러운 둥근 호감형", "vibe": "환하고 귀여운 눈웃음과 보기만 해도 기분 좋은 푸근함"},
@@ -124,123 +157,346 @@ CELEBRITY_CATALOG = [
     {"name": "박나래", "query": "박나래", "file": "park_na_rae.jpg", "gender": "female", "category": "방송인", "face_type": "개성 넘치고 유쾌한 에너지의 호감형", "vibe": "동글동글한 눈매와 친근하고 에너지 넘치는 인상"}
 ]
 
-def fetch_image_if_missing(query_name, filename, lang="ko"):
-    out_path = os.path.join(CELEB_DIR, filename)
-    if os.path.exists(out_path) and os.path.getsize(out_path) > 4000:
-        return True
+WIKIDATA_QUERY = """
+SELECT ?p ?ko ?en ?gender ?cat ?img ?links ?occ WHERE {
+  ?p wdt:P27 wd:Q884; wdt:P31 wd:Q5; wdt:P21 ?gender; wdt:P373 ?cat; wikibase:sitelinks ?links.
+  ?p wdt:P106 ?occ. VALUES ?occ { wd:Q33999 wd:Q10800557 wd:Q10798782 wd:Q177220 wd:Q947873 wd:Q4610556 wd:Q245068 wd:Q488205 }
+  ?p wdt:P569 ?birth. FILTER(YEAR(?birth) >= 1950)
+  FILTER NOT EXISTS { ?p wdt:P570 ?death }
+  OPTIONAL { ?p wdt:P18 ?img }
+  ?p rdfs:label ?ko FILTER(LANG(?ko)="ko")
+  OPTIONAL { ?p rdfs:label ?en FILTER(LANG(?en)="en") }
+} ORDER BY DESC(?links) LIMIT 4000
+"""
 
-    print(f"Fetching {query_name} ({lang})...")
-    encoded = urllib.parse.quote(query_name)
-    url = f"https://{lang}.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch={encoded}&gsrlimit=1&prop=pageimages&piprop=original&format=json"
-
-    req = urllib.request.Request(url, headers=HEADERS)
-    try:
-        with urllib.request.urlopen(req, timeout=8) as r:
-            data = json.loads(r.read().decode('utf-8'))
-            pages = data.get('query', {}).get('pages', {})
-            img_url = None
-            for pid, info in pages.items():
-                if 'original' in info and 'source' in info['original']:
-                    img_url = info['original']['source']
-                    break
-
-            if not img_url:
-                print(f"[SKIP] No image found for {query_name}")
-                return False
-
-            img_req = urllib.request.Request(img_url, headers=HEADERS)
-            with urllib.request.urlopen(img_req, timeout=12) as ir:
-                raw_bytes = ir.read()
-
-            with Image.open(io.BytesIO(raw_bytes)) as img:
-                img = img.convert("RGB")
-                w, h = img.size
-                min_dim = min(w, h)
-                left = (w - min_dim) // 2
-                top = max(0, (h - min_dim) // 3)
-                right = left + min_dim
-                bottom = top + min_dim
-                if bottom > h:
-                    top = h - min_dim
-                    bottom = h
-
-                cropped = img.crop((left, top, right, bottom))
-                resized = cropped.resize((600, 600), Image.Resampling.LANCZOS)
-                resized.save(out_path, format="JPEG", quality=85, optimize=True)
-
-            print(f"[DOWNLOADED] {filename} ({round(os.path.getsize(out_path)/1024)} KB)")
-            return True
-    except Exception as e:
-        print(f"[ERROR] {query_name}: {e}")
-        return False
+_print_lock = threading.Lock()
 
 
-def build_celebrity_embeddings_database():
-    """Extract YuNet faces and SFace 128-D embeddings for all celebrities and save DB."""
-    yunet_path = os.path.join(MODELS_DIR, "face_detection_yunet.onnx")
-    sface_path = os.path.join(MODELS_DIR, "face_recognition_sface.onnx")
+def log(msg: str):
+    with _print_lock:
+        print(msg, flush=True)
 
-    if not os.path.exists(sface_path) or not os.path.exists(yunet_path):
-        print(f"[ERROR] Model files missing in {MODELS_DIR}")
-        return
 
-    recognizer = cv2.FaceRecognizerSF.create(sface_path, '')
-    print("Building SFace embeddings database...")
+def _retry_sleep(attempt: int, error: Exception):
+    time.sleep(10 if "429" in str(error) else 2 * (attempt + 1))
 
-    db_entries = []
-    success_count = 0
 
-    for item in CELEBRITY_CATALOG:
-        fname = item["file"]
-        img_path = os.path.join(CELEB_DIR, fname)
-        if not os.path.exists(img_path):
+def http_json(url: str, timeout: float = 20, retries: int = 3):
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={**HTTP_HEADERS, "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            if attempt == retries - 1:
+                raise
+            _retry_sleep(attempt, e)
+
+
+def http_bytes(url: str, timeout: float = 20, retries: int = 3) -> bytes:
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=HTTP_HEADERS), timeout=timeout) as r:
+                return r.read()
+        except Exception as e:
+            if attempt == retries - 1:
+                raise
+            _retry_sleep(attempt, e)
+
+
+def clean_name(name: str) -> str:
+    return re.sub(r"\s*\(.*?\)\s*", "", name).strip()
+
+
+def slugify(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def fetch_wikidata_people(limit: int) -> dict:
+    url = "https://query.wikidata.org/sparql?" + urllib.parse.urlencode({"query": WIKIDATA_QUERY, "format": "json"})
+    rows = http_json(url, timeout=90)["results"]["bindings"]
+    people = {}
+    for b in rows:
+        qid = b["p"]["value"].rsplit("/", 1)[-1]
+        person = people.setdefault(qid, {
+            "qid": qid,
+            "name": clean_name(b["ko"]["value"]),
+            "name_en": clean_name(b.get("en", {}).get("value", "")),
+            "gender": GENDER_QIDS.get(b["gender"]["value"].rsplit("/", 1)[-1]),
+            "commons_category": b["cat"]["value"],
+            "main_image": b.get("img", {}).get("value", "").rsplit("/", 1)[-1],
+            "sitelinks": int(b["links"]["value"]),
+            "occupations": set(),
+        })
+        person["occupations"].add(b["occ"]["value"].rsplit("/", 1)[-1])
+
+    for person in people.values():
+        occs = person.pop("occupations")
+        person["category"] = next((c for q, c in OCCUPATION_CATEGORY if occs & q), "연예인")
+
+    ranked = sorted((p for p in people.values() if p["gender"]), key=lambda p: -p["sitelinks"])
+    return {p["qid"]: p for p in ranked[:limit]}
+
+
+def resolve_seed(seed: dict):
+    """Find the Wikidata item for a hand-written seed via Korean (or English) Wikipedia search."""
+    for lang, query in [(seed.get("lang", "ko"), seed["query"]), ("en", seed.get("en_query"))]:
+        if not query:
             continue
+        url = f"https://{lang}.wikipedia.org/w/api.php?" + urllib.parse.urlencode({
+            "action": "query", "generator": "search", "gsrsearch": query, "gsrlimit": 1,
+            "prop": "pageprops", "ppprop": "wikibase_item", "format": "json"})
+        pages = http_json(url).get("query", {}).get("pages", {})
+        qid = next((p.get("pageprops", {}).get("wikibase_item") for p in pages.values()), None)
+        if not qid:
+            continue
+        ent = http_json("https://www.wikidata.org/w/api.php?" + urllib.parse.urlencode({
+            "action": "wbgetentities", "ids": qid, "props": "claims|labels", "languages": "en",
+            "format": "json"}))["entities"][qid]
+        claims = ent.get("claims", {})
 
-        img = cv2.imread(img_path)
+        def claim(pid):
+            try:
+                return claims[pid][0]["mainsnak"]["datavalue"]["value"]
+            except (KeyError, IndexError):
+                return None
+
+        return {
+            "qid": qid,
+            "name_en": clean_name(ent.get("labels", {}).get("en", {}).get("value", "")),
+            "commons_category": claim("P373"),
+            "main_image": claim("P18") or "",
+        }
+    return None
+
+
+def list_commons_photos(person: dict) -> list:
+    """(file title, thumb url) pairs: main Wikidata image first, then deepcat search results."""
+    titles = []
+    if person.get("main_image"):
+        titles.append("File:" + urllib.parse.unquote(person["main_image"]))
+    if person.get("commons_category"):
+        url = "https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode({
+            "action": "query", "list": "search", "srnamespace": 6, "srlimit": 25,
+            "srsearch": f'deepcat:"{person["commons_category"]}" filetype:bitmap', "format": "json"})
+        try:
+            titles += [r["title"] for r in http_json(url).get("query", {}).get("search", [])]
+        except Exception as e:
+            log(f"[WARN] Commons search failed for {person['name']}: {e}")
+    titles = list(dict.fromkeys(t for t in titles if not re.search(r"(?i)logo|signature|autograph|\.svg$", t)))
+    titles = titles[:PHOTOS_PER_PERSON + 4]
+    if not titles:
+        return []
+
+    url = "https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode({
+        "action": "query", "titles": "|".join(titles), "prop": "imageinfo",
+        "iiprop": "url|mime", "iiurlwidth": THUMB_WIDTH, "format": "json"})
+    data = http_json(url)
+    # The API normalizes titles (e.g. underscores); map back to what we asked for
+    normalized = {n["to"]: n["from"] for n in data.get("query", {}).get("normalized", [])}
+    info = {}
+    for page in data.get("query", {}).get("pages", {}).values():
+        ii = (page.get("imageinfo") or [{}])[0]
+        if ii.get("mime") in ("image/jpeg", "image/png", "image/webp"):
+            info[normalized.get(page["title"], page["title"])] = ii.get("thumburl") or ii.get("url")
+    return [(t, info[t]) for t in titles if t in info][:PHOTOS_PER_PERSON]
+
+
+def load_person_photos(person: dict) -> list:
+    """Download (or read cached) photos; returns [(file title, raw bytes)]."""
+    folder = os.path.join(CACHE_DIR, person["qid"])
+    manifest_path = os.path.join(folder, "manifest.json")
+    if os.path.exists(manifest_path):
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+    else:
+        os.makedirs(folder, exist_ok=True)
+        manifest = []
+        for i, (title, url) in enumerate(list_commons_photos(person)):
+            try:
+                data = http_bytes(url)
+            except Exception as e:
+                log(f"[WARN] download failed {title}: {e}")
+                continue
+            fname = f"{i:02d}.img"
+            with open(os.path.join(folder, fname), "wb") as f:
+                f.write(data)
+            manifest.append({"title": title, "file": fname})
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False)
+
+    photos = []
+    for m in manifest:
+        path = os.path.join(folder, m["file"])
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                photos.append((m["title"], f.read()))
+    return photos
+
+
+def consensus_embedding(photos: list):
+    """
+    Identify the person as the face that recurs across their photos.
+    Returns (mean embedding, n_matched, (title, img_bgr, face_row) for display) or None.
+    """
+    faces = []  # (photo index, title, img, face_row, embedding)
+    for idx, (title, data) in enumerate(photos):
+        img = decode_image_bgr(data)
         if img is None:
             continue
+        for row in detect_faces_yunet(img, score_threshold=0.7):
+            if min(row[2], row[3]) < MIN_FACE_PX:
+                continue
+            emb = embed_face(img, row)
+            if emb is not None:
+                faces.append((idx, title, img, row, emb))
+    if not faces:
+        return None
 
-        h, w = img.shape[:2]
-        det = cv2.FaceDetectorYN.create(yunet_path, '', (w, h), 0.45, 0.3, 5)
-        _, faces = det.detect(img)
-        if faces is None or len(faces) == 0:
-            print(f"[WARN] No face found in {fname}")
+    embs = np.array([f[4] for f in faces])
+    sims = embs @ embs.T
+    photo_ids = np.array([f[0] for f in faces])
+
+    # Support = number of *other* photos containing a face matching this one
+    supports = []
+    for i in range(len(faces)):
+        matches = np.where(sims[i] >= SAME_PERSON_COS)[0]
+        supports.append(len({photo_ids[j] for j in matches if photo_ids[j] != photo_ids[i]}))
+
+    if max(supports) > 0:
+        anchor = max(range(len(faces)), key=lambda i: (supports[i], faces[i][3][2] * faces[i][3][3]))
+    else:
+        # No recurring face: trust only a solo face in the Wikidata main image (photo 0)
+        solo_main = [i for i in range(len(faces)) if photo_ids[i] == 0 and (photo_ids == 0).sum() == 1]
+        if not solo_main:
+            return None
+        anchor = solo_main[0]
+
+    # Best matching face per photo
+    chosen = {}
+    for i, f in enumerate(faces):
+        if i == anchor or sims[anchor, i] >= SAME_PERSON_COS:
+            if f[0] not in chosen or sims[anchor, i] > sims[anchor, chosen[f[0]]]:
+                chosen[f[0]] = i
+    idxs = list(chosen.values())
+    mean = embs[idxs].mean(axis=0)
+    mean /= np.linalg.norm(mean)
+
+    # Display photo: large face that is most typical of the person
+    best = max(idxs, key=lambda i: float(embs[i] @ mean) + min(faces[i][3][2], 200) / 400.0)
+    return mean, len(idxs), (faces[best][1], faces[best][2], faces[best][3])
+
+
+def save_display_photo(img_bgr, face_row, out_path: str):
+    h, w = img_bgr.shape[:2]
+    fx, fy, fw, fh = map(int, face_row[:4])
+    px, py, size, _ = compute_square_face_box(fx, fy, fw, fh, w, h, [float(v) for v in face_row[4:8]])
+    crop = np.ascontiguousarray(img_bgr[py:py + size, px:px + size][:, :, ::-1])
+    Image.fromarray(crop).resize((DISPLAY_SIZE, DISPLAY_SIZE), Image.Resampling.LANCZOS).save(
+        out_path, format="JPEG", quality=85, optimize=True)
+
+
+def build_person(person: dict):
+    photos = load_person_photos(person)
+    if not photos:
+        return None
+    result = consensus_embedding(photos)
+    if result is None:
+        return None
+    mean, n_matched, (title, img, row) = result
+
+    filename = person["file"]
+    save_display_photo(img, row, os.path.join(CELEB_DIR, filename))
+    entry = {
+        "name": person["name"],
+        "name_en": person.get("name_en", ""),
+        "qid": person["qid"],
+        "gender": person["gender"],
+        "category": person["category"],
+        "filename": filename,
+        "photo_url": f"/facematching/static/celebrities/{filename}",
+        "photo_source": "https://commons.wikimedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_")),
+        "n_photos": n_matched,
+        "embedding": [round(float(v), 5) for v in mean],
+    }
+    for key in ("face_type", "vibe"):
+        if person.get(key):
+            entry[key] = person[key]
+    return entry
+
+
+def collect_candidates(limit: int) -> list:
+    log("Querying Wikidata...")
+    people = fetch_wikidata_people(limit)
+    log(f"  {len(people)} people from Wikidata")
+
+    for seed in CELEBRITY_CATALOG:
+        try:
+            info = resolve_seed(seed)
+        except Exception as e:
+            log(f"[WARN] seed lookup failed for {seed['name']}: {e}")
+            info = None
+        if not info:
+            log(f"[WARN] seed not found on Wikidata: {seed['name']}")
             continue
+        base = people.get(info["qid"], {**info, "sitelinks": 0})
+        base.update({
+            "name": seed["name"], "gender": seed["gender"], "category": seed["category"],
+            "file": seed["file"], "face_type": seed["face_type"], "vibe": seed["vibe"],
+            "commons_category": base.get("commons_category") or info["commons_category"],
+            "main_image": base.get("main_image") or info["main_image"],
+        })
+        base.setdefault("name_en", info["name_en"])
+        people[info["qid"]] = base
+        time.sleep(0.1)
+    return list(people.values())
 
-        # Choose largest face if multiple
-        best_face = max(faces, key=lambda f: f[2] * f[3])
-        aligned = recognizer.alignCrop(img, best_face)
-        feat = recognizer.feature(aligned)
-        norm = float(np.linalg.norm(feat))
-        if norm > 0:
-            feat_norm = (feat / norm).flatten().tolist()
-        else:
-            continue
 
-        entry = {
-            "name": item["name"],
-            "gender": item["gender"],
-            "category": item["category"],
-            "filename": fname,
-            "face_type": item["face_type"],
-            "vibe": item["vibe"],
-            "photo_url": f"/facematching/static/celebrities/{fname}",
-            "embedding": feat_norm
-        }
-        db_entries.append(entry)
-        success_count += 1
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=600, help="max people taken from Wikidata")
+    parser.add_argument("--workers", type=int, default=4)
+    args = parser.parse_args()
 
+    if not os.path.exists(YUNET_PATH) or not os.path.exists(ARCFACE_PATH):
+        raise SystemExit("[ERROR] models/face_detection_yunet.onnx and models/arcface_w600k_r50.onnx are required")
+
+    candidates = collect_candidates(args.limit)
+
+    # Assign unique display filenames up front (seeds keep theirs; English slugs can collide)
+    used = {p["file"] for p in candidates if p.get("file")}
+    for p in candidates:
+        if not p.get("file"):
+            slug = slugify(p.get("name_en") or p.get("commons_category") or "") or p["qid"].lower()
+            p["file"] = f"{slug}.jpg" if f"{slug}.jpg" not in used else f"{slug}_{p['qid'].lower()}.jpg"
+            used.add(p["file"])
+
+    log(f"Building embeddings for {len(candidates)} candidates...")
+
+    entries, failed = [], []
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {pool.submit(build_person, p): p for p in candidates}
+        for n, fut in enumerate(as_completed(futures), start=1):
+            person = futures[fut]
+            try:
+                entry = fut.result()
+            except Exception as e:
+                log(f"[ERROR] {person['name']}: {e}")
+                entry = None
+            if entry:
+                entries.append(entry)
+            else:
+                failed.append(person["name"])
+            if n % 25 == 0:
+                log(f"  {n}/{len(candidates)} processed, {len(entries)} ok")
+
+    entries.sort(key=lambda e: e["name"])
     with open(DB_PATH, "w", encoding="utf-8") as f:
-        json.dump(db_entries, f, ensure_ascii=False, indent=2)
-
-    print(f"\n[DONE] Built celebrity database with {success_count} entries saved to {DB_PATH}")
+        json.dump(entries, f, ensure_ascii=False, indent=1)
+    log(f"\n[DONE] {len(entries)} celebrities saved to {DB_PATH} ({len(failed)} skipped)")
+    if failed:
+        log("Skipped: " + ", ".join(failed))
 
 
 if __name__ == "__main__":
-    print("Step 1: Downloading missing images from Wikipedia...")
-    for item in CELEBRITY_CATALOG:
-        fetch_image_if_missing(item["query"], item["file"], item.get("lang", "ko"))
-        time.sleep(0.15)
-
-    print("\nStep 2: Generating Deep Face Embeddings (YuNet + SFace)...")
-    build_celebrity_embeddings_database()
+    main()

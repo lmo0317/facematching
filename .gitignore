@@ -4,3 +4,5 @@ venv/
 .env
 .DS_Store
 models/*.onnx
+!models/face_detection_yunet.onnx
+data/
