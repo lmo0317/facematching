@@ -24,18 +24,20 @@ import urllib.request
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import cv2
 import numpy as np
 from PIL import Image
 
 from face_utils import (
-    ARCFACE_PATH, YUNET_PATH, HTTP_HEADERS,
-    compute_square_face_box, decode_image_bgr, detect_faces_yunet, embed_face,
+    ARCFACE_PATH, YUNET_PATH, CLIP_PATH, HTTP_HEADERS,
+    compute_square_face_box, decode_image_bgr, detect_faces_yunet, embed_face, clip_image_embedding,
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CELEB_DIR = os.path.join(BASE_DIR, "static", "celebrities")
 CACHE_DIR = os.path.join(BASE_DIR, "data", "celeb_cache")
 DB_PATH = os.path.join(BASE_DIR, "celebrity_db.json")
+VISUAL_PATH = os.path.join(BASE_DIR, "celebrity_visual.npz")
 
 PHOTOS_PER_PERSON = 10
 THUMB_WIDTH = 960
@@ -508,7 +510,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=2200, help="max people taken from Wikidata (after decade quotas)")
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--visual-only", action="store_true", help="only rebuild celebrity_visual.npz from the current DB")
     args = parser.parse_args()
+
+    if args.visual_only:
+        with open(DB_PATH, encoding="utf-8") as f:
+            write_visual_index(json.load(f))
+        return
 
     if not os.path.exists(YUNET_PATH) or not os.path.exists(ARCFACE_PATH):
         raise SystemExit("[ERROR] models/face_detection_yunet.onnx and models/arcface_w600k_r50.onnx are required")
@@ -549,6 +557,23 @@ def main():
     log(f"\n[DONE] {len(entries)} celebrities saved to {DB_PATH} ({len(failed)} skipped)")
     if failed:
         log("Skipped: " + ", ".join(failed))
+    write_visual_index(entries)
+
+
+def write_visual_index(entries: list):
+    """CLIP embedding of each celebrity's display photo (what the user compares against on screen)."""
+    if not os.path.exists(CLIP_PATH):
+        log("[WARN] models/clip_vit_b32_vision_q.onnx missing; visual index not written")
+        return
+    qids, vecs = [], []
+    for e in entries:
+        img = cv2.imread(os.path.join(CELEB_DIR, e["filename"]))
+        v = clip_image_embedding(img) if img is not None else None
+        if v is not None:
+            qids.append(e["qid"])
+            vecs.append(v)
+    np.savez_compressed(VISUAL_PATH, qids=np.array(qids), emb=np.array(vecs, dtype=np.float16))
+    log(f"[DONE] visual index for {len(qids)} celebrities saved to {VISUAL_PATH}")
 
 
 if __name__ == "__main__":

@@ -36,10 +36,12 @@ populate_celebrities.py    # 오프라인: Wikidata/Commons에서 연예인 사�
 tools/calibrate_scores.py  # 오프라인: 가족/남남/동일인 코사인 분포 측정 (유사도→% 환산 기준 근거)
 tools/eval_lookalike.py    # 오프라인: 닮은 연예인 검색 정확도 평가 (사람들이 닮았다고 말하는 쌍 기준)
 tools/lookalike_pairs.txt  # 평가용 닮은꼴 연예인 쌍 (나무위키·기사 출처)
-celebrity_db.json          # 연예인 메타데이터 + 512-D 평균 임베딩 (populate 산출물)
+celebrity_db.json          # 연예인 메타데이터 + 512-D 평균 임베딩 (populate 산출물, 한 줄에 1명)
+celebrity_visual.npz       # 연예인 대표 사진의 CLIP 임베딩 (시각 재정렬용, populate 산출물)
 models/
   face_detection_yunet.onnx    # 얼굴 검출 (git 추적 — .gitignore 예외)
   arcface_w600k_r50.onnx       # 얼굴 임베딩 (git 미추적, 서버에 수동 배치)
+  clip_vit_b32_vision_q.onnx   # CLIP 이미지 인코더(양자화, 약 90MB) — 시각 재정렬용 (git 미추적, 서버에 수동 배치)
 data/                      # 빌드 캐시 (git 미추적): celeb_cache/<QID>/, kin_cache/, build.log
 static/
   index.html               # 단일 페이지 UI (탭 2개 + 크롭/웹캠 모달)
@@ -118,9 +120,10 @@ mv models/w600k_r50.onnx models/arcface_w600k_r50.onnx
 ### 4.5 닮은 연예인 (`celebrity_service.execute_celebrity_lookalike`)
 1. 사용자 ArcFace 임베딩 vs DB 전체 평균 임베딩 코사인 → 순위. 추가 사진이 있으면 메인 사진과 코사인 ≥ 0.25인 것만 평균에 넣고 나머지는 다른 사람으로 보고 제외(`photos_used`/`photos_rejected`)
 2. 성별: 필터 `male`/`female`은 코드에서 강제. `auto`는 최근접 15명의 성별을 유사도 가중 다수결로 추정.
-3. TOP 5 선정 후 `celebrity` 프로필로 % 환산. **후보와 점수는 여기서 확정**됩니다.
-4. Gemma에는 사용자 사진 + 상위 3명(`GEMMA_DESCRIBED`) 사진을 주고 얼굴 특징·닮은 이유·부위별 점수만 요청합니다(이름 변경 금지). 실패 시 DB의 `face_type`/`vibe`나 기본 문구로 대체.
-5. DB에 없는 사람은 절대 결과에 나오지 않습니다(실시간 위키 검색·대체 사진 없음).
+3. **시각 재정렬**: 상위 `VISUAL_POOL_K`(10)명 안에서 `ArcFace 코사인 + VISUAL_WEIGHT(0.03) × z(CLIP 유사도)`로 순서를 보정합니다. CLIP은 사용자 사진의 머리 포함 크롭 vs 연예인 대표 사진(`celebrity_visual.npz`). 상위 후보는 사실상 동점(1·2위 차이 중앙값 0.017)이라 ArcFace 순서만으로는 화면에 보이는 1위가 TOP 5 중 눈으로 가장 닮은 경우가 23%(무작위 수준)였고, 보정 후 40%입니다(평가 세트 정확도는 동일). 가중치를 올리면 이 비율은 오르지만 0.05부터 정확도가 떨어집니다.
+4. TOP 5를 보정 점수로 `celebrity` 프로필 % 환산. **후보와 점수는 여기서 확정**됩니다. 검색마다 `celebrity search: ...` 로그(성별·사진 수·TOP 5 이름/점수/코사인, 사진은 저장 안 함)를 남깁니다.
+5. Gemma에는 사용자 사진 + 상위 3명(`GEMMA_DESCRIBED`) 사진을 주고 얼굴 특징·닮은 이유·부위별 점수만 요청합니다(이름 변경 금지). 실패 시 DB의 `face_type`/`vibe`나 기본 문구로 대체.
+6. DB에 없는 사람은 절대 결과에 나오지 않습니다(실시간 위키 검색·대체 사진 없음).
 
 ### 4.6 얼굴 검출 API (`detect_faces_in_image`)
 - EXIF 회전 보정 후 YuNet(score 0.55) → 실패 시 Haar Cascade 폴백
@@ -183,6 +186,8 @@ python populate_celebrities.py --workers 4   # 약 2천 명, 캐시 없으면 1.
   ssh local-ai-server "journalctl --user -u facematch.service -f"
   ```
 - 서버에 `models/arcface_w600k_r50.onnx`와 venv의 `onnxruntime`이 있어야 합니다. 없으면 두 기능 모두 얼굴 인식 점수를 낼 수 없습니다.
+- `models/clip_vit_b32_vision_q.onnx`(HuggingFace `Xenova/clip-vit-base-patch32`의 `onnx/vision_model_quantized.onnx`)가 없으면 시각 재정렬 없이 ArcFace 순서로만 동작합니다.
+- 대표 사진을 바꾸거나 DB를 다시 만들면 `python populate_celebrities.py --visual-only`로 `celebrity_visual.npz`도 갱신하세요(전체 빌드 시에는 자동).
 
 ---
 

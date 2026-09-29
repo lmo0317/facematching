@@ -185,15 +185,68 @@ def primary_face(img_bgr: np.ndarray, score_threshold: float = 0.6) -> Optional[
 
 def extract_face_embedding(image_bytes: bytes) -> Optional[np.ndarray]:
     """ArcFace embedding of the largest face in the image, or None if no face/model."""
+    feats = extract_face_features(image_bytes, with_visual=False)
+    return feats[0] if feats else None
+
+
+def extract_face_features(image_bytes: bytes, with_visual: bool = True) -> Optional[Tuple[np.ndarray, Optional[np.ndarray]]]:
+    """(ArcFace identity embedding, CLIP head-crop embedding or None) of the largest face, or None."""
     try:
         img_bgr = decode_image_bgr(image_bytes)
         if img_bgr is None:
             return None
         face = primary_face(img_bgr)
-        return embed_face(img_bgr, face) if face is not None else None
+        if face is None:
+            return None
+        identity = embed_face(img_bgr, face)
+        if identity is None:
+            return None
+        return identity, (visual_embedding(img_bgr, face) if with_visual else None)
     except Exception as e:
-        logger.warning(f"Error extracting face embedding: {e}")
+        logger.warning(f"Error extracting face features: {e}")
         return None
+
+
+# ---- Visual impression (CLIP) -------------------------------------------------------------
+# ArcFace deliberately ignores hair, makeup, expression and pose, but people judge "looks alike"
+# from exactly those. CLIP on the same head crop the UI shows is used to order near-tied matches.
+CLIP_PATH = os.path.join(MODELS_DIR, "clip_vit_b32_vision_q.onnx")
+CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
+CLIP_STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
+_CLIP_SESSION = None
+
+
+def get_clip_session():
+    global _CLIP_SESSION
+    if _CLIP_SESSION is None and os.path.exists(CLIP_PATH):
+        try:
+            import onnxruntime as ort
+            _CLIP_SESSION = ort.InferenceSession(CLIP_PATH, providers=["CPUExecutionProvider"])
+        except Exception as e:
+            logger.warning(f"Failed to load CLIP model: {e}")
+    return _CLIP_SESSION
+
+
+def head_crop(img_bgr: np.ndarray, face_row: np.ndarray) -> np.ndarray:
+    """Square face+hair crop, same framing as the celebrity display photos."""
+    h, w = img_bgr.shape[:2]
+    fx, fy, fw, fh = map(int, face_row[:4])
+    px, py, size, _ = compute_square_face_box(fx, fy, fw, fh, w, h, [float(v) for v in face_row[4:8]])
+    return img_bgr[py:py + size, px:px + size]
+
+
+def clip_image_embedding(img_bgr: np.ndarray) -> Optional[np.ndarray]:
+    session = get_clip_session()
+    if session is None:
+        return None
+    x = cv2.resize(img_bgr, (224, 224), interpolation=cv2.INTER_AREA)[:, :, ::-1].astype(np.float32) / 255.0
+    x = ((x - CLIP_MEAN) / CLIP_STD).transpose(2, 0, 1)[None]
+    v = session.run(None, {"pixel_values": x})[0][0]
+    return v / np.linalg.norm(v)
+
+
+def visual_embedding(img_bgr: np.ndarray, face_row: np.ndarray) -> Optional[np.ndarray]:
+    return clip_image_embedding(head_crop(img_bgr, face_row))
 
 
 # ArcFace cosine -> human-facing percentage, piecewise-linear between anchors.

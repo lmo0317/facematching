@@ -1,8 +1,9 @@
 """
 Celebrity Lookalike Service (닮은 연예인 탐색 서비스)
-1. ArcFace(512-D) 얼굴 임베딩으로 celebrity_db.json 전체에서 가장 가까운 연예인 TOP 3를 선정 (후보 선정·점수는 임베딩만 사용)
-2. 성별 필터는 코드에서 강제 (auto: 가장 가까운 연예인들의 성별 다수결로 추정)
-3. Gemma 4 E4B는 사용자 사진 + 선정된 연예인 사진을 보고 얼굴 특징과 닮은 이유 설명만 작성
+1. ArcFace(512-D) 얼굴 임베딩으로 celebrity_db.json 전체에서 가까운 연예인 후보를 선정
+2. 거의 동점인 상위 후보는 화면에 보이는 사진끼리의 인상(CLIP) 유사도로 순서를 보정해 TOP 5 확정
+3. 성별 필터는 코드에서 강제 (auto: 가장 가까운 연예인들의 성별 다수결로 추정)
+4. Gemma 4 E4B는 사용자 사진 + 상위 연예인 사진을 보고 얼굴 특징과 닮은 이유 설명만 작성
 """
 
 import os
@@ -19,6 +20,7 @@ from face_utils import (
     image_bytes_to_data_url,
     extract_json_block,
     extract_face_embedding,
+    extract_face_features,
     data_url_to_bytes,
     similarity_to_percent,
     adjust_part_scores,
@@ -29,14 +31,22 @@ logger = logging.getLogger("facematch.celebrity")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CELEB_DIR = os.path.join(BASE_DIR, "static", "celebrities")
 DB_PATH = os.path.join(BASE_DIR, "celebrity_db.json")
+VISUAL_PATH = os.path.join(BASE_DIR, "celebrity_visual.npz")
 
 TOP_K = 5
 GEMMA_DESCRIBED = 3        # Gemma explains only the top matches (each extra image adds latency)
 SAME_PERSON_MIN_COS = 0.25  # extra photos below this vs the main photo are treated as someone else
 GENDER_VOTE_K = 15
+# The top ArcFace candidates are near-ties (median #1-#2 gap 0.017, far below photo-to-photo noise), and
+# ArcFace ignores hair/makeup/expression, so the shown #1 was the visually closest of the top 5 only 23%
+# of the time. Within the top VISUAL_POOL_K, add VISUAL_WEIGHT x (z-scored CLIP similarity of the shown
+# photos): look-alike eval accuracy unchanged, shown #1 visually closest 23% -> 40%.
+VISUAL_POOL_K = 10
+VISUAL_WEIGHT = 0.03
 PART_KEYS = ["eyes", "nose", "mouth", "face_shape", "features"]
 
 _CACHED_DB: Optional[Tuple[List[Dict[str, Any]], np.ndarray]] = None
+_CACHED_VISUAL: Optional[np.ndarray] = None
 
 
 class FaceNotFoundError(Exception):
@@ -65,6 +75,46 @@ def load_celebrity_db() -> Tuple[List[Dict[str, Any]], np.ndarray]:
     if len(valid):
         _CACHED_DB = (valid, matrix)
     return valid, matrix
+
+
+def load_visual_matrix(entries: List[Dict[str, Any]]) -> Optional[np.ndarray]:
+    """CLIP embeddings of the display photos aligned with entries (zero rows where missing), or None."""
+    global _CACHED_VISUAL
+    if _CACHED_VISUAL is not None and len(_CACHED_VISUAL) == len(entries):
+        return _CACHED_VISUAL
+    if not os.path.exists(VISUAL_PATH):
+        return None
+    try:
+        data = np.load(VISUAL_PATH)
+        pos = {q: i for i, q in enumerate(data["qids"].tolist())}
+        emb = data["emb"].astype(np.float32)
+        visual = np.zeros((len(entries), emb.shape[1]), dtype=np.float32)
+        for i, e in enumerate(entries):
+            if e["qid"] in pos:
+                visual[i] = emb[pos[e["qid"]]]
+        _CACHED_VISUAL = visual
+        return visual
+    except Exception as e:
+        logger.warning(f"Failed to load visual index: {e}")
+        return None
+
+
+def visual_rerank(sims: np.ndarray, candidates: List[int], user_visual: Optional[np.ndarray],
+                  visual: Optional[np.ndarray]) -> Tuple[List[int], Dict[int, float]]:
+    """Order candidates by ArcFace similarity, nudging near-ties by how alike the shown photos look."""
+    ranked = sorted(candidates, key=lambda i: -sims[i])
+    scores = {i: float(sims[i]) for i in ranked}
+    if user_visual is None or visual is None:
+        return ranked, scores
+    pool = ranked[:VISUAL_POOL_K]
+    v = visual[pool] @ user_visual
+    has = np.linalg.norm(visual[pool], axis=1) > 0
+    if has.sum() >= 2:
+        z = (v - v[has].mean()) / (v[has].std() + 1e-9)
+        for i, zi, ok in zip(pool, z, has):
+            if ok:
+                scores[i] += VISUAL_WEIGHT * float(zi)
+    return sorted(candidates, key=lambda i: -scores[i]), scores
 
 
 def infer_gender(sims: np.ndarray, entries: List[Dict[str, Any]]) -> str:
@@ -167,9 +217,10 @@ async def execute_celebrity_lookalike(
     if not entries:
         raise RuntimeError("연예인 데이터베이스가 비어 있습니다. populate_celebrities.py로 DB를 생성하세요.")
 
-    main_feat = extract_face_embedding(raw_bytes)
-    if main_feat is None:
+    main = extract_face_features(raw_bytes, with_visual=True)
+    if main is None:
         raise FaceNotFoundError("사진에서 얼굴을 찾지 못했습니다. 얼굴이 잘 보이는 정면 사진을 올려 주세요.")
+    main_feat, user_visual = main
 
     # Averaging several photos of the same person cancels out one photo's angle/lighting/expression
     # (look-alike eval: median rank of the known look-alike 36 -> 18 with 3 photos)
@@ -190,9 +241,14 @@ async def execute_celebrity_lookalike(
     sims = matrix @ user_feat.astype(np.float32)
     gender = gender_filter if gender_filter in ("male", "female") else infer_gender(sims, entries)
     pool = [i for i, e in enumerate(entries) if e.get("gender") == gender] or list(range(len(entries)))
-    top = sorted(pool, key=lambda i: -sims[i])[:TOP_K]
+    ranked, scores = visual_rerank(sims, pool, user_visual, load_visual_matrix(entries))
+    top = ranked[:TOP_K]
     matches = [{"entry": entries[i], "cosine": float(sims[i]),
-                "percent": similarity_to_percent(float(sims[i]), "celebrity")} for i in top]
+                "percent": similarity_to_percent(scores[i], "celebrity")} for i in top]
+    logger.info(
+        "celebrity search: gender=%s(%s) photos=%d rejected=%d visual=%s top=%s",
+        gender, gender_filter, len(feats), rejected, user_visual is not None,
+        ", ".join(f"{m['entry']['name']} {m['percent']}% (cos {m['cosine']:.3f})" for m in matches))
 
     # 2. Gemma writes the explanations for the fixed matches
     user_url = image_bytes_to_data_url(raw_bytes, max_dim=768)

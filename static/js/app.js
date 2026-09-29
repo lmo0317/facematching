@@ -1316,6 +1316,8 @@ function renderCelebrityResults(data) {
           <span class="text-xs font-bold text-amber-300">${medal}: ${escapeHtml(c.name)} <span class="text-[11px] text-slate-400 font-normal">(${escapeHtml(c.category || '연예인')})</span></span>
           <span class="px-2 py-0.5 rounded-full text-[11px] font-extrabold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">${Number(c.similarity_percent) || 0}%</span>
         </div>
+        ${Math.abs((top.similarity_percent || 0) - (Number(c.similarity_percent) || 0)) <= 3
+          ? '<span class="inline-block mb-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30">1위와 비슷한 수준</span>' : ''}
         <p class="text-xs text-slate-300 truncate">${escapeHtml(c.summary || c.reason || '')}</p>
         <p class="text-[11px] text-slate-400 line-clamp-1 mt-0.5">${escapeHtml(c.reason || '')}</p>
       </div>
