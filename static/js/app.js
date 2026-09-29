@@ -6,6 +6,7 @@ let photo1OriginalData = null; // uncropped original dataURL
 let photo2OriginalData = null; // uncropped original dataURL
 let photoCelebData = null; // dataURL for celebrity search
 let photoCelebOriginalData = null;
+let celebExtraPhotos = []; // extra dataURLs of the same person (max 2), averaged server-side
 let detectedFacesCeleb = [];
 let selectedCelebGender = 'auto'; // 'auto' | 'male' | 'female'
 
@@ -374,7 +375,48 @@ function clearCelebPhoto() {
   if (fileInfo) fileInfo.textContent = '선택된 파일 없음';
   const inp = document.getElementById('file-input-celeb');
   if (inp) inp.value = '';
+  celebExtraPhotos = [];
+  renderCelebExtraPhotos();
   updateCelebButtonState();
+}
+
+const MAX_CELEB_EXTRA = 2;
+
+async function handleCelebExtraFiles(e) {
+  const files = Array.from(e.target.files || []).filter(f => f.type.startsWith('image/'));
+  for (const file of files) {
+    if (celebExtraPhotos.length >= MAX_CELEB_EXTRA) break;
+    try {
+      const { dataUrl } = await compressImage(file, 800, 0.85);
+      celebExtraPhotos.push(dataUrl);
+    } catch (err) {
+      console.warn('추가 사진 처리 실패:', err);
+    }
+  }
+  e.target.value = '';
+  renderCelebExtraPhotos();
+}
+
+function removeCelebExtraPhoto(index) {
+  celebExtraPhotos.splice(index, 1);
+  renderCelebExtraPhotos();
+}
+
+function renderCelebExtraPhotos() {
+  const list = document.getElementById('celeb-extra-list');
+  const addBtn = document.getElementById('btn-add-celeb-extra');
+  if (!list) return;
+  list.innerHTML = '';
+  celebExtraPhotos.forEach((url, i) => {
+    const item = document.createElement('div');
+    item.className = 'relative w-16 h-16 rounded-lg overflow-hidden border border-white/10 bg-slate-800';
+    item.innerHTML = `
+      <img src="${url}" alt="추가 사진 ${i + 1}" class="w-full h-full object-cover">
+      <button type="button" onclick="removeCelebExtraPhoto(${i})" title="삭제"
+        class="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-black/70 text-white text-xs leading-5 text-center hover:bg-rose-600">×</button>`;
+    list.appendChild(item);
+  });
+  if (addBtn) addBtn.disabled = celebExtraPhotos.length >= MAX_CELEB_EXTRA;
 }
 
 function clearPhoto(targetId) {
@@ -1120,6 +1162,7 @@ async function startCelebritySearch() {
   try {
     const payload = {
       image_base64: photoCelebData,
+      extra_images_base64: celebExtraPhotos,
       gender_filter: selectedCelebGender
     };
 
@@ -1163,6 +1206,16 @@ function renderCelebrityResults(data) {
   const top = data.top_celebrity || {};
   const vibe = data.face_features || {};
   const candidates = data.candidates || [];
+
+  const note = document.getElementById('celeb-photo-note');
+  if (note) {
+    const used = data.photos_used || 1;
+    const rejected = data.photos_rejected || 0;
+    note.textContent = rejected > 0
+      ? `사진 ${used}장을 종합해 분석했습니다. 다른 사람으로 보이는 사진 ${rejected}장은 제외했습니다.`
+      : used > 1 ? `사진 ${used}장을 종합해 분석했습니다.` : '';
+    note.classList.toggle('hidden', !note.textContent);
+  }
 
   // 1. Photos
   document.getElementById('celeb-result-user-img').src = photoCelebData;
@@ -1253,7 +1306,7 @@ function renderCelebrityResults(data) {
     const card = document.createElement('div');
     card.className = 'glass-card rounded-2xl p-4 border border-white/10 flex items-center space-x-4 bg-slate-900/60';
     
-    const medal = c.rank === 2 ? '🥈 2위' : '🥉 3위';
+    const medal = { 2: '🥈 2위', 3: '🥉 3위' }[c.rank] || `${c.rank}위`;
     card.innerHTML = `
       <div class="w-16 h-16 rounded-xl overflow-hidden shrink-0 border border-white/10 bg-slate-800">
         <img src="${escapeHtml(c.photo_url || '')}" alt="${escapeHtml(c.name)}" class="w-full h-full object-cover" onerror="this.style.visibility='hidden'">

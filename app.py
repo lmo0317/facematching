@@ -240,6 +240,7 @@ class DetectFacesRequest(BaseModel):
 
 class CelebrityMatchRequest(BaseModel):
     image_base64: str
+    extra_images_base64: Optional[List[str]] = None  # more photos of the same person (max 2)
     gender_filter: Optional[str] = "auto"
 
 
@@ -414,6 +415,7 @@ async def find_celebrity_endpoint(req: CelebrityMatchRequest):
     try:
         result = await execute_celebrity_lookalike(
             image_b64=img,
+            extra_images_b64=(req.extra_images_base64 or [])[:2],
             gender_filter=req.gender_filter or "auto",
             llama_url=LLAMA_SERVER_URL,
             model_name=MODEL_NAME

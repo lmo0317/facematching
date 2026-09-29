@@ -10,7 +10,7 @@ Build celebrity_db.json: Korean celebrities with a multi-photo ArcFace embedding
    normalized embedding.
 4. A face-centered square display photo is written to static/celebrities/.
 
-Usage: python populate_celebrities.py [--limit 600] [--workers 4]
+Usage: python populate_celebrities.py [--limit 2200] [--workers 4]
 Requires models/face_detection_yunet.onnx and models/arcface_w600k_r50.onnx.
 """
 
@@ -44,6 +44,9 @@ SAME_PERSON_COS = 0.40   # ArcFace: different people rarely exceed ~0.3
 DISPLAY_SIZE = 360
 
 GENDER_QIDS = {"Q6581097": "male", "Q6581072": "female"}
+# People per (birth decade, gender), most-known first. Ranking by fame alone gives a DB of mostly
+# 20-something idols, so older users got no genuinely similar face; older decades take everyone available.
+DECADE_QUOTA = {1940: None, 1950: None, 1960: None, 1970: None, 1980: 350, 1990: 330, 2000: 80}
 OCCUPATION_CATEGORY = [  # first match wins
     ({"Q177220", "Q488205"}, "가수"),
     ({"Q33999", "Q10800557", "Q10798782"}, "배우"),
@@ -158,7 +161,7 @@ CELEBRITY_CATALOG = [
 ]
 
 WIKIDATA_QUERY = """
-SELECT ?p ?ko ?en ?gender ?cat ?img ?links ?occ WHERE {
+SELECT ?p ?ko ?en ?gender ?cat ?img ?links ?occ (YEAR(?birth) AS ?born) WHERE {
   ?p wdt:P27 wd:Q884; wdt:P31 wd:Q5; wdt:P21 ?gender; wdt:P373 ?cat; wikibase:sitelinks ?links.
   ?p wdt:P106 ?occ. VALUES ?occ { wd:Q33999 wd:Q10800557 wd:Q10798782 wd:Q177220 wd:Q947873 wd:Q4610556 wd:Q245068 wd:Q488205 }
   ?p wdt:P569 ?birth. FILTER(YEAR(?birth) >= 1950)
@@ -166,7 +169,7 @@ SELECT ?p ?ko ?en ?gender ?cat ?img ?links ?occ WHERE {
   OPTIONAL { ?p wdt:P18 ?img }
   ?p rdfs:label ?ko FILTER(LANG(?ko)="ko")
   OPTIONAL { ?p rdfs:label ?en FILTER(LANG(?en)="en") }
-} ORDER BY DESC(?links) LIMIT 4000
+} ORDER BY DESC(?links) LIMIT 15000
 """
 
 _print_lock = threading.Lock()
@@ -250,6 +253,7 @@ def fetch_wikidata_people(limit: int) -> dict:
             "commons_category": b["cat"]["value"],
             "main_image": b.get("img", {}).get("value", "").rsplit("/", 1)[-1],
             "sitelinks": int(b["links"]["value"]),
+            "born": int(b["born"]["value"]) if "born" in b else None,
             "occupations": set(),
         })
         person["occupations"].add(b["occ"]["value"].rsplit("/", 1)[-1])
@@ -258,8 +262,17 @@ def fetch_wikidata_people(limit: int) -> dict:
         occs = person.pop("occupations")
         person["category"] = next((c for q, c in OCCUPATION_CATEGORY if occs & q), "연예인")
 
-    ranked = sorted((p for p in people.values() if p["gender"]), key=lambda p: -p["sitelinks"])
-    return {p["qid"]: p for p in ranked[:limit]}
+    ranked = sorted((p for p in people.values() if p["gender"] and p["born"]), key=lambda p: -p["sitelinks"])
+    taken, chosen = {}, []
+    for p in ranked:
+        group = (p["born"] // 10 * 10, p["gender"])
+        if group[0] not in DECADE_QUOTA:
+            continue
+        quota = DECADE_QUOTA[group[0]]
+        if quota is None or taken.get(group, 0) < quota:
+            taken[group] = taken.get(group, 0) + 1
+            chosen.append(p)
+    return {p["qid"]: p for p in chosen[:limit]}
 
 
 def resolve_seed(seed: dict):
@@ -456,7 +469,7 @@ def build_person(person: dict):
         "photo_url": f"/facematching/static/celebrities/{filename}",
         "photo_source": "https://commons.wikimedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_")),
         "n_photos": n_matched,
-        "embedding": [round(float(v), 5) for v in mean],
+        "embedding": [round(float(v), 4) for v in mean],
     }
     for key in ("face_type", "vibe"):
         if person.get(key):
@@ -493,7 +506,7 @@ def collect_candidates(limit: int) -> list:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=600, help="max people taken from Wikidata")
+    parser.add_argument("--limit", type=int, default=2200, help="max people taken from Wikidata (after decade quotas)")
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
 
@@ -531,7 +544,8 @@ def main():
 
     entries.sort(key=lambda e: e["name"])
     with open(DB_PATH, "w", encoding="utf-8") as f:
-        json.dump(entries, f, ensure_ascii=False, indent=1)
+        # One celebrity per line keeps the file small and diffs readable
+        f.write("[\n" + ",\n".join(json.dumps(e, ensure_ascii=False) for e in entries) + "\n]\n")
     log(f"\n[DONE] {len(entries)} celebrities saved to {DB_PATH} ({len(failed)} skipped)")
     if failed:
         log("Skipped: " + ", ".join(failed))

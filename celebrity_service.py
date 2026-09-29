@@ -19,6 +19,7 @@ from face_utils import (
     image_bytes_to_data_url,
     extract_json_block,
     extract_face_embedding,
+    data_url_to_bytes,
     similarity_to_percent,
     adjust_part_scores,
 )
@@ -29,7 +30,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CELEB_DIR = os.path.join(BASE_DIR, "static", "celebrities")
 DB_PATH = os.path.join(BASE_DIR, "celebrity_db.json")
 
-TOP_K = 3
+TOP_K = 5
+GEMMA_DESCRIBED = 3        # Gemma explains only the top matches (each extra image adds latency)
+SAME_PERSON_MIN_COS = 0.25  # extra photos below this vs the main photo are treated as someone else
 GENDER_VOTE_K = 15
 PART_KEYS = ["eyes", "nose", "mouth", "face_shape", "features"]
 
@@ -155,18 +158,33 @@ async def execute_celebrity_lookalike(
     image_b64: str,
     gender_filter: str = "auto",
     llama_url: str = "http://127.0.0.1:8081",
-    model_name: str = "gemma-4-e4b-it-q4km"
+    model_name: str = "gemma-4-e4b-it-q4km",
+    extra_images_b64: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    data_str = image_b64.split(",", 1)[1] if "," in image_b64 else image_b64
-    raw_bytes = base64.b64decode(data_str)
+    raw_bytes = data_url_to_bytes(image_b64)
 
     entries, matrix = load_celebrity_db()
     if not entries:
         raise RuntimeError("연예인 데이터베이스가 비어 있습니다. populate_celebrities.py로 DB를 생성하세요.")
 
-    user_feat = extract_face_embedding(raw_bytes)
-    if user_feat is None:
+    main_feat = extract_face_embedding(raw_bytes)
+    if main_feat is None:
         raise FaceNotFoundError("사진에서 얼굴을 찾지 못했습니다. 얼굴이 잘 보이는 정면 사진을 올려 주세요.")
+
+    # Averaging several photos of the same person cancels out one photo's angle/lighting/expression
+    # (look-alike eval: median rank of the known look-alike 36 -> 18 with 3 photos)
+    feats, rejected = [main_feat], 0
+    for extra in extra_images_b64 or []:
+        try:
+            feat = extract_face_embedding(data_url_to_bytes(extra))
+        except Exception:
+            feat = None
+        if feat is not None and float(feat @ main_feat) >= SAME_PERSON_MIN_COS:
+            feats.append(feat)
+        else:
+            rejected += 1
+    user_feat = np.mean(feats, axis=0)
+    user_feat /= np.linalg.norm(user_feat)
 
     # 1. Rank every celebrity by ArcFace cosine similarity
     sims = matrix @ user_feat.astype(np.float32)
@@ -178,7 +196,7 @@ async def execute_celebrity_lookalike(
 
     # 2. Gemma writes the explanations for the fixed matches
     user_url = image_bytes_to_data_url(raw_bytes, max_dim=768)
-    gemma = await request_gemma_descriptions(user_url, matches, llama_url, model_name) or {}
+    gemma = await request_gemma_descriptions(user_url, matches[:GEMMA_DESCRIBED], llama_url, model_name) or {}
     gemma_matches = gemma.get("matches") if isinstance(gemma.get("matches"), list) else []
 
     formatted = []
@@ -193,7 +211,7 @@ async def execute_celebrity_lookalike(
             "similarity_percent": m["percent"],
             "cosine": round(m["cosine"], 4),
             "detailed_scores": adjust_part_scores(g.get("detailed_scores"), m["percent"], PART_KEYS),
-            "summary": g.get("summary") or f"{name}과(와) 얼굴 인식 AI가 측정한 이목구비 구조가 가장 가깝습니다.",
+            "summary": g.get("summary") or e.get("face_type") or "얼굴 인식 AI가 측정한 눈·코·입 배치와 얼굴 윤곽이 가까운 후보입니다.",
             "reason": g.get("reason") or e.get("vibe") or "눈매와 얼굴형 등 이목구비의 전체적인 배치가 유사합니다.",
             "matching_points": g.get("matching_points") or [p for p in [e.get("face_type"), "이목구비 배치", "얼굴 윤곽"] if p],
             "photo_url": e["photo_url"],
@@ -204,6 +222,8 @@ async def execute_celebrity_lookalike(
         "success": True,
         "method": "arcface",
         "gender_used": gender,
+        "photos_used": len(feats),
+        "photos_rejected": rejected,
         "face_features": {
             "face_type": gemma.get("animal_vibe") or "분석 정보 없음",
             "face_shape": gemma.get("face_shape") or "분석 정보 없음",

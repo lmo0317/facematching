@@ -13,7 +13,7 @@
 | 탭 | 기능 | API |
 |---|---|---|
 | `compare` | **사진 2장 닮음 분석** (가족·붕어빵 지수) | `POST /api/compare-json` |
-| `celeb` | **내 사진으로 닮은 연예인 찾기** (TOP 3 + 실사진) | `POST /api/find-celebrity` |
+| `celeb` | **내 사진으로 닮은 연예인 찾기** (TOP 5 + 실사진, 사진 최대 3장) | `POST /api/find-celebrity` |
 
 **역할 분담 원칙 (중요)**
 - **점수·후보 선정은 ArcFace 임베딩이 담당**합니다. 같은 입력이면 항상 같은 결과가 나오고 실제 얼굴 구조에 근거합니다.
@@ -34,6 +34,8 @@ celebrity_service.py       # 닮은 연예인 탐색 (ArcFace 최근접 검색 +
 face_utils.py              # 공용: 이미지 정규화, YuNet 검출, ArcFace 정렬·임베딩, 유사도→% 환산, LLM JSON 추출
 populate_celebrities.py    # 오프라인: Wikidata/Commons에서 연예인 사진 수집 → 다중 사진 평균 임베딩 DB 생성
 tools/calibrate_scores.py  # 오프라인: 가족/남남/동일인 코사인 분포 측정 (유사도→% 환산 기준 근거)
+tools/eval_lookalike.py    # 오프라인: 닮은 연예인 검색 정확도 평가 (사람들이 닮았다고 말하는 쌍 기준)
+tools/lookalike_pairs.txt  # 평가용 닮은꼴 연예인 쌍 (나무위키·기사 출처)
 celebrity_db.json          # 연예인 메타데이터 + 512-D 평균 임베딩 (populate 산출물)
 models/
   face_detection_yunet.onnx    # 얼굴 검출 (git 추적 — .gitignore 예외)
@@ -73,7 +75,7 @@ mv models/w600k_r50.onnx models/arcface_w600k_r50.onnx
 
 - 로컬(Windows)에는 LLM 서버가 없습니다. 두 기능 모두 LLM 없이도 동작하며(ArcFace 점수 + 기본 문구), 설명 문장은 112 서버에서만 생성됩니다.
 - LLM을 로컬에서 쓰려면 SSH 터널로 112 서버의 8081을 포워딩한 뒤 `LLAMA_SERVER_URL`을 지정하세요.
-- 자동화 테스트는 없습니다. 변경 검증은 예제 프리셋(`/api/samples`)과 연예인 본인 사진 → 본인 1위 여부로 확인합니다.
+- 자동화 테스트는 없습니다. 닮은 연예인 검색을 바꿀 때는 `python tools/eval_lookalike.py`로 R@3/R@10/중앙 순위를 변경 전후 비교하세요(얼굴 뱅크 캐시가 없으면 몇 분 걸림). 2장 비교는 예제 프리셋으로 확인합니다.
 
 ---
 
@@ -93,7 +95,7 @@ mv models/w600k_r50.onnx models/arcface_w600k_r50.onnx
 | POST | `/api/detect-faces` | YuNet(→ Haar 폴백) 얼굴 검출, 1:1 크롭 박스 + 80px 썸네일 반환 |
 | POST | `/api/compare` | multipart 업로드 비교 (프론트 미사용, 외부 호출용) |
 | POST | `/api/compare-json` | base64 JSON 비교 (프론트가 사용) |
-| POST | `/api/find-celebrity` | 닮은 연예인 TOP 3 (얼굴 미검출 시 400) |
+| POST | `/api/find-celebrity` | 닮은 연예인 TOP 5. `extra_images_base64`(같은 사람 추가 사진 최대 2장) 선택. 얼굴 미검출 시 400 |
 
 ### 4.2 얼굴 임베딩 (`face_utils`)
 - `decode_image_bgr`(EXIF 회전 반영) → `detect_faces_yunet`(긴 변 1280px로 축소 검출 후 원본 좌표로 복원) → 가장 큰 얼굴
@@ -114,10 +116,10 @@ mv models/w600k_r50.onnx models/arcface_w600k_r50.onnx
 5. **Gemma 장애 시에도 ArcFace만으로 결과를 반환**합니다. 얼굴을 못 찾으면 Gemma 점수만 사용하고 그 사실을 `environmental_factors`에 적습니다. 둘 다 불가하면 기존 에러 매핑(502/503/504).
 
 ### 4.5 닮은 연예인 (`celebrity_service.execute_celebrity_lookalike`)
-1. 사용자 ArcFace 임베딩 vs DB 전체 평균 임베딩 코사인 → 순위
+1. 사용자 ArcFace 임베딩 vs DB 전체 평균 임베딩 코사인 → 순위. 추가 사진이 있으면 메인 사진과 코사인 ≥ 0.25인 것만 평균에 넣고 나머지는 다른 사람으로 보고 제외(`photos_used`/`photos_rejected`)
 2. 성별: 필터 `male`/`female`은 코드에서 강제. `auto`는 최근접 15명의 성별을 유사도 가중 다수결로 추정.
-3. TOP 3 선정 후 `celebrity` 프로필로 % 환산. **후보와 점수는 여기서 확정**됩니다.
-4. Gemma에는 사용자 사진 + 선정된 3명 사진을 주고 얼굴 특징·닮은 이유·부위별 점수만 요청합니다(이름 변경 금지). 실패 시 DB의 `face_type`/`vibe`나 기본 문구로 대체.
+3. TOP 5 선정 후 `celebrity` 프로필로 % 환산. **후보와 점수는 여기서 확정**됩니다.
+4. Gemma에는 사용자 사진 + 상위 3명(`GEMMA_DESCRIBED`) 사진을 주고 얼굴 특징·닮은 이유·부위별 점수만 요청합니다(이름 변경 금지). 실패 시 DB의 `face_type`/`vibe`나 기본 문구로 대체.
 5. DB에 없는 사람은 절대 결과에 나오지 않습니다(실시간 위키 검색·대체 사진 없음).
 
 ### 4.6 얼굴 검출 API (`detect_faces_in_image`)
@@ -143,9 +145,10 @@ mv models/w600k_r50.onnx models/arcface_w600k_r50.onnx
 ## 6. 연예인 DB 관리
 
 ```bash
-python populate_celebrities.py --limit 600 --workers 4   # 진행 로그는 표준출력
+python populate_celebrities.py --workers 4   # 약 2천 명, 캐시 없으면 1.5~2시간 (진행 로그는 표준출력)
 ```
-- 후보 = `CELEBRITY_CATALOG` 시드(항상 포함, 손으로 쓴 `face_type`/`vibe` 설명 재사용) + Wikidata의 생존 한국 연예인 중 Commons 카테고리가 있는 사람을 sitelinks(인지도) 순으로 `--limit`명.
+- 후보 = `CELEBRITY_CATALOG` 시드(항상 포함, 손으로 쓴 `face_type`/`vibe` 설명 재사용) + Wikidata의 생존 한국 연예인 중 Commons 카테고리가 있는 사람.
+- **출생 연대·성별별 할당량(`DECADE_QUOTA`)**으로 뽑습니다. 인지도순으로만 뽑으면 20대 아이돌 위주가 되어 30대 이상 사용자에게 닮은 얼굴이 없었기 때문입니다(1970년대 이전 출생은 전원, 1980·90년대는 성별당 350·330명, 2000년대 80명).
 - 사람마다 Commons `deepcat` 검색으로 최대 10장을 받아 `data/celeb_cache/<QID>/`에 캐시합니다. **재실행 시 캐시를 재사용**하므로 증분 빌드가 빠릅니다(완전히 받은 사람만 재사용).
 - 본인 식별은 **여러 사진에 반복 등장하는 얼굴**(ArcFace 코사인 ≥ 0.40)로 합니다. 단체 사진·로고·다른 사람은 자동 제외되고, 일치한 얼굴들의 평균 임베딩을 저장합니다(`n_photos`).
 - 대표 사진은 일치 얼굴 중 크고 전형적인 것을 골라 얼굴 중심으로 크롭해 `static/celebrities/`에 씁니다. 원본 출처는 `photo_source`(Commons 파일 페이지)에 남습니다.
@@ -184,6 +187,8 @@ python populate_celebrities.py --limit 600 --workers 4   # 진행 로그는 표�
 ---
 
 ## 9. 알려진 이슈 / 주의사항
+
+- **닮은 연예인 검색의 한계(실측)**: 사람들이 닮았다고 말하는 쌍 68개 기준, 사진 1장일 때 상대가 TOP 3에 드는 비율 약 18%, TOP 10 약 29%(무작위면 중앙 순위 약 150위 → 현재 27위). 얼굴형 비율(106 랜드마크)·나이·CLIP(전체 인상)·glintr100 모델을 섞어 봤지만 개선이 없었습니다. 효과가 확인된 것은 **사진 여러 장 평균**(중앙 순위 36→18위)과 **DB 다양화**입니다.
 
 - OpenCV는 서버와 동일하게 `opencv-python-headless`를 사용합니다. 같은 venv에 `opencv-python`을 함께 설치하면 `cv2`가 충돌합니다.
 - InsightFace 사전학습 모델(`w600k_r50`)은 **비상업·연구용 라이선스**입니다. 상업 서비스로 전환 시 교체를 검토하세요.
