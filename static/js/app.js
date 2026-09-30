@@ -1493,7 +1493,7 @@ function setDescribeStatus(text, { spinning = true, retry = false } = {}) {
 async function fetchCelebDescriptions(data, token) {
   let current = { ...data, descriptions_pending: true };
   const parts = [
-    { part: 'top', label: '1위 연예인과 내 얼굴 특징을 분석하고 있어요 (약 20초)' },
+    { part: 'top', label: '1위 연예인과 내 얼굴 특징을 분석하고 있어요 (약 10초)' },
   ];
   for (const { part, label } of parts) {
     // skip parts that already arrived (e.g. when retrying after a failure)

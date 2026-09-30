@@ -158,6 +158,30 @@ BRIEF_MATCH_SCHEMA = (
     '      "detailed_scores": {"eyes": 0, "nose": 0, "mouth": 0, "face_shape": 0, "features": 0}\n'
     "    }"
 )
+# Compact variants for the interactive "top" call: same sections, fewer sentences.
+# Generation runs ~75 tok/s, so halving the output (~670 -> ~350 tokens) saves ~4s.
+COMPACT_MATCH_SCHEMA = (
+    "    {\n"
+    '      "summary": "<가장 닮은 포인트, 40자 이내>",\n'
+    '      "reason": "<어느 부위가 어떻게 닮았는지, 80자 이내>",\n'
+    '      "part_notes": {"eyes": "<눈매 비교, 30자 이내>", "nose": "<코 비교, 30자 이내>", '
+    '"mouth": "<입매 비교, 30자 이내>", "face_shape": "<얼굴형 비교, 30자 이내>"},\n'
+    '      "differences": ["<눈에 띄게 다른 점, 40자 이내>"],\n'
+    '      "matching_points": ["<닮은 점 키워드>", "<키워드>", "<키워드>"],\n'
+    '      "detailed_scores": {"eyes": 0, "nose": 0, "mouth": 0, "face_shape": 0, "features": 0}\n'
+    "    }"
+)
+COMPACT_FEATURES_SCHEMA = (
+    '  "gender": "<남성 또는 여성>",\n'
+    '  "age_group": "<추정 연령대>",\n'
+    '  "impression_keywords": ["<인상 키워드>", "<키워드>", "<키워드>"],\n'
+    '  "animal_vibe": "<동물상 한 단어>",\n'
+    '  "face_shape": "<얼굴형·턱선 특징, 40자 이내>",\n'
+    '  "eyes": "<눈매 특징, 40자 이내>",\n'
+    '  "nose": "<코 특징, 40자 이내>",\n'
+    '  "mouth": "<입매 특징, 40자 이내>",\n'
+    '  "overall_vibe": "<전체 인상과 매력, 70자 이내>",\n'
+)
 USER_FEATURES_SCHEMA = (
     '  "gender": "<남성 또는 여성>",\n'
     '  "age_group": "<추정 연령대>",\n'
@@ -196,7 +220,8 @@ async def request_gemma_descriptions(
 
     names = ", ".join(f"{first_rank + i}위 {m['entry']['name']}" for i, m in enumerate(matches))
     with_features = mode in ("top", "full")
-    schema = BRIEF_MATCH_SCHEMA if mode == "others" else DETAILED_MATCH_SCHEMA
+    schema = {"others": BRIEF_MATCH_SCHEMA, "top": COMPACT_MATCH_SCHEMA}.get(mode, DETAILED_MATCH_SCHEMA)
+    features_schema = COMPACT_FEATURES_SCHEMA if mode == "top" else USER_FEATURES_SCHEMA
     prompt = (
         "\n\n당신은 안면 형태학 전문가입니다. 얼굴 인식 AI가 [사진 0] 사용자와 닮은 연예인으로 "
         f"{names}을(를) 이미 선정했습니다.\n"
@@ -205,9 +230,11 @@ async def request_gemma_descriptions(
         "눈매(쌍꺼풀, 눈꼬리, 눈 크기), 코(콧대, 콧볼, 코끝), 입매(입술 두께, 입꼬리), 얼굴형(턱선, 광대, 얼굴 길이), "
         "이목구비 배치를 중심으로 설명합니다. '부드러운 인상' 같은 막연한 표현만 반복하지 말고 형태를 묘사하세요.\n"
         "detailed_scores는 각 부위가 얼마나 닮았는지 0~100 점수입니다. 부위 간 차이가 드러나도록 솔직하게 매기세요.\n\n"
-        "반드시 다음 JSON 형식으로만 출력하세요:\n"
+        + "설명에서는 '사진 0', '사진 1' 같은 번호 대신 '사용자'와 연예인 이름으로 지칭하세요.\n"
+        + ("글자 수 제한을 반드시 지키고, JSON은 들여쓰기·줄바꿈 없이 한 줄로 출력하세요.\n" if mode == "top" else "")
+        + "반드시 다음 JSON 형식으로만 출력하세요:\n"
         "{\n"
-        f"{USER_FEATURES_SCHEMA if with_features else ''}"
+        f"{features_schema if with_features else ''}"
         '  "matches": [\n'
         f"{schema}\n"
         "  ]\n"
@@ -220,7 +247,7 @@ async def request_gemma_descriptions(
         "model": model_name,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.3,
-        "max_tokens": {"top": 1600, "others": 1800}.get(mode, 3500),
+        "max_tokens": {"top": 1000, "others": 1800}.get(mode, 3500),
         "stream": False,
         "cache_prompt": False,
     }

@@ -98,7 +98,7 @@ mv models/w600k_r50.onnx models/arcface_w600k_r50.onnx
 | POST | `/api/compare` | multipart 업로드 비교 (프론트 미사용, 외부 호출용) |
 | POST | `/api/compare-json` | base64 JSON 비교 (프론트가 사용) |
 | POST | `/api/find-celebrity` | 닮은 연예인 TOP 5. `extra_images_base64`(같은 사람 추가 사진 최대 2장) 선택. `describe:false`면 설명 없이 순위만 약 2초에 반환(`descriptions_pending`). 얼굴 미검출 시 400 |
-| POST | `/api/describe-celebrity` | 2단계: `qids`·`percents`로 이미 선정된 후보의 Gemma 설명. `part`: `top`(내 얼굴 특징 + 1위 상세, 약 18초) / `others`(2~5위 간결, 약 31초) / `all` |
+| POST | `/api/describe-celebrity` | 2단계: `qids`·`percents`로 이미 선정된 후보의 Gemma 설명. `part`: `top`(내 얼굴 특징 + 1위 상세, 약 7초) / `others`(2~5위 간결, 약 31초) / `all` |
 
 ### 4.2 얼굴 임베딩 (`face_utils`)
 - `decode_image_bgr`(EXIF 회전 반영) → `detect_faces_yunet`(긴 변 1280px로 축소 검출 후 원본 좌표로 복원) → 가장 큰 얼굴
@@ -126,6 +126,7 @@ mv models/w600k_r50.onnx models/arcface_w600k_r50.onnx
 5. Gemma에는 사용자 사진 + TOP 5(`GEMMA_DESCRIBED`) 사진을 주고 설명만 요청합니다(이름 변경 금지): 내 얼굴 특징(인상 키워드·얼굴형·눈매·코·입·전체 인상), 후보별 요약·닮은 이유(1위 3문장)·부위별 비교(`part_notes`)·다른 점(`differences`)·부위별 점수. 실패 시 DB의 `face_type`/`vibe`나 기본 문구로 대체.
    - 한 번에 쓰면 50~70초가 걸려 **공개 경로(nginx `location /` → Service Hub:3000 → 8501)의 기본 60초 제한에 걸려 멈췄습니다.** 그래서 나눕니다: 프론트는 `describe:false`로 순위를 먼저 그리고(`renderCelebrityResults`), `fetchCelebDescriptions`가 `part=top`(내 얼굴 특징 + 1위 상세)만 받아 텍스트를 합칩니다. **2~5위는 AI 설명 없이 사진·이름·분야·점수만** 보여 줍니다(느리다는 피드백으로 `part=others` 호출을 뺐음, 백엔드에는 남아 있음)(요청당 80초 클라이언트 타임아웃, 실패 시 "다시 시도" 버튼이 빠진 부분만 재요청). 새 검색이 시작되면 `celebSearchToken`으로 늦게 온 응답을 버립니다. 서버 로그 `gemma describe mode=... took Ns`로 소요 시간을 확인할 수 있습니다.
    - 설명 요청 하나가 60초를 넘기지 않게 유지하세요(출력 길이·후보 수를 늘리면 다시 나눠야 합니다).
+   - `top` 속도 근거(실측): 이미지 2장 prefill 약 1초(mmproj GPU) + 출력 약 420토큰 × 13ms ≈ 5.5초. 그래서 `top`은 `COMPACT_*_SCHEMA`(항목별 글자 수 제한, 한 줄 JSON)로 출력을 줄입니다. 설명을 길게 늘리면 그만큼 느려집니다.
 6. DB에 없는 사람은 절대 결과에 나오지 않습니다(실시간 위키 검색·대체 사진 없음).
 
 ### 4.6 얼굴 검출 API (`detect_faces_in_image`)
@@ -195,6 +196,7 @@ python populate_celebrities.py --workers 4   # 약 2천 명, 캐시 없으면 1.
 - 호스트: `192.168.219.112` (SSH 별칭 `local-ai-server`), GPU RTX 2070 SUPER (Gemma 전용, ArcFace는 CPU)
 - 배포 경로: `/home/lmo0317/apps/facematch` (venv: `venv/`, git 저장소 아님)
 - 서비스: `facematch.service` (systemd **user** service), `llama-gemma4.service`에 의존
+- `llama-gemma4.service`(`~/.config/systemd/user/`)는 `--no-mmproj-offload` 없이 실행해 이미지 인코더(mmproj)를 GPU에서 돌립니다(이미지당 prefill 3.6초 → 1.3초, VRAM 약 4.8GB 사용). 되돌리려면 같은 폴더의 `llama-gemma4.service.bak-before-mmproj-offload`를 복원하고 `daemon-reload` 후 재시작하세요.
 - 외부 접근: 리버스 프록시 `https://minohlee.mooo.com/facematching/` → `:8501`
 - 별도 배포 스크립트는 없습니다. 파일을 복사(scp)한 뒤 재시작합니다. `data/`(빌드 캐시)는 올리지 않습니다.
   ```bash
