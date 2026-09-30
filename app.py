@@ -15,8 +15,10 @@ import cv2
 import numpy as np
 
 from face_utils import (
-    YUNET_PATH, compute_square_face_box, image_bytes_to_data_url, extract_json_block, strip_thought_tags,
+    YUNET_PATH, FACE_CROP_SCALE, FACE_CROP_EYE, compute_square_face_box,
+    image_bytes_to_data_url, extract_json_block, strip_thought_tags,
     extract_face_embedding, similarity_to_percent, adjust_part_scores, data_url_to_bytes,
+    decode_image_bgr, detect_faces_yunet, embed_face,
 )
 
 # Logging setup
@@ -115,7 +117,8 @@ def detect_faces_in_image(image_bytes: bytes) -> List[Dict[str, Any]]:
         count = len(raw_faces)
         detected = []
         for i, (fx, fy, fw, fh, score, landmarks) in enumerate(raw_faces):
-            px, py, pw, ph = compute_square_face_box(fx, fy, fw, fh, w, h, landmarks)
+            px, py, pw, ph = compute_square_face_box(fx, fy, fw, fh, w, h, landmarks,
+                                                     scale=FACE_CROP_SCALE, eye_ratio=FACE_CROP_EYE)
 
             thumb = img_pil.crop((px, py, px + pw, py + ph))
             thumb = thumb.resize((80, 80), Image.Resampling.LANCZOS)
@@ -236,12 +239,22 @@ class CompareJsonRequest(BaseModel):
 
 class DetectFacesRequest(BaseModel):
     image_base64: str
+    # Optional photo of the person we are looking for: each face gets a `similarity` to it
+    reference_image_base64: Optional[str] = None
 
 
 class CelebrityMatchRequest(BaseModel):
     image_base64: str
     extra_images_base64: Optional[List[str]] = None  # more photos of the same person (max 2)
     gender_filter: Optional[str] = "auto"
+    describe: Optional[bool] = True  # False: ranking only (~2s); texts come from /api/describe-celebrity
+
+
+class CelebrityDescribeRequest(BaseModel):
+    image_base64: str
+    qids: List[str]
+    percents: Optional[List[int]] = None
+    part: Optional[str] = "all"  # "top" (features + #1), "others" (#2..#5) or "all"
 
 
 @app.get("/facematching")
@@ -254,7 +267,8 @@ async def redirect_facematching():
 async def serve_index():
     index_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_path):
-        return FileResponse(index_path)
+        # no-cache: the page itself is small and must never be served stale after a deploy
+        return FileResponse(index_path, headers={"Cache-Control": "no-cache"})
     return HTMLResponse("<h1>FaceMatch AI - 로딩 중...</h1>")
 
 
@@ -359,11 +373,33 @@ async def detect_faces_endpoint(req: DetectFacesRequest):
         raise HTTPException(status_code=400, detail="유효한 Base64 이미지가 아닙니다.")
 
     faces = detect_faces_in_image(image_bytes)
+    best_match = None
+    if req.reference_image_base64 and faces:
+        best_match = attach_reference_similarity(image_bytes, faces, data_url_to_bytes(req.reference_image_base64))
     return {
         "success": True,
         "count": len(faces),
-        "faces": faces
+        "faces": faces,
+        "best_match": best_match
     }
+
+
+def attach_reference_similarity(image_bytes: bytes, faces: List[Dict[str, Any]], reference_bytes: bytes) -> Optional[int]:
+    """Add ArcFace cosine to the reference person on every detected face; return index of the best match."""
+    ref = extract_face_embedding(reference_bytes)
+    img = decode_image_bgr(image_bytes)
+    if ref is None or img is None:
+        return None
+    rows = detect_faces_yunet(img, 0.5)
+    for face in faces:
+        b = face["box"]
+        cx, cy = b["x"] + b["width"] / 2, b["y"] + b["height"] / 2
+        # Pair the API face with the YuNet row whose center is closest (same image, same detector)
+        row = min(rows, key=lambda r: (r[0] + r[2] / 2 - cx) ** 2 + (r[1] + r[3] / 2 - cy) ** 2, default=None)
+        emb = embed_face(img, row) if row is not None else None
+        face["similarity"] = round(float(emb @ ref), 3) if emb is not None else None
+    scored = [i for i, f in enumerate(faces) if f.get("similarity") is not None]
+    return max(scored, key=lambda i: faces[i]["similarity"]) if scored else None
 
 
 @app.post("/api/compare")
@@ -416,6 +452,7 @@ async def find_celebrity_endpoint(req: CelebrityMatchRequest):
         result = await execute_celebrity_lookalike(
             image_b64=img,
             extra_images_b64=(req.extra_images_base64 or [])[:2],
+            describe=req.describe is not False,
             gender_filter=req.gender_filter or "auto",
             llama_url=LLAMA_SERVER_URL,
             model_name=MODEL_NAME
@@ -427,6 +464,21 @@ async def find_celebrity_endpoint(req: CelebrityMatchRequest):
         logger.error(f"Celebrity match error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"닮은 연예인 검색 중 오류 발생: {str(e)}")
 
+
+
+@app.post("/api/describe-celebrity")
+@app.post("/facematching/api/describe-celebrity")
+async def describe_celebrity_endpoint(req: CelebrityDescribeRequest):
+    """Second phase of the celebrity search: detailed Gemma descriptions for already chosen matches."""
+    from celebrity_service import describe_celebrity_matches
+    try:
+        return await describe_celebrity_matches(req.image_base64, req.qids[:5], req.percents or [],
+                                                LLAMA_SERVER_URL, MODEL_NAME, part=req.part or "all")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Celebrity describe error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="설명을 만드는 중 오류가 발생했습니다.")
 
 PART_KEYS = ["eyes", "nose", "mouth", "face_shape", "features"]
 # Share of the final score taken from the ArcFace measurement (rest: Gemma's visual judgement).

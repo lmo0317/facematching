@@ -10,6 +10,7 @@ import os
 import json
 import base64
 import logging
+import time
 from typing import Dict, Any, List, Optional, Tuple
 
 import numpy as np
@@ -19,10 +20,11 @@ from face_utils import (
     EMBEDDING_DIM,
     image_bytes_to_data_url,
     extract_json_block,
-    extract_face_embedding,
     extract_face_features,
+    best_matching_embedding,
     data_url_to_bytes,
     similarity_to_percent,
+    celebrity_match_strength,
     adjust_part_scores,
 )
 
@@ -34,7 +36,7 @@ DB_PATH = os.path.join(BASE_DIR, "celebrity_db.json")
 VISUAL_PATH = os.path.join(BASE_DIR, "celebrity_visual.npz")
 
 TOP_K = 5
-GEMMA_DESCRIBED = 3        # Gemma explains only the top matches (each extra image adds latency)
+GEMMA_DESCRIBED = 5        # Gemma explains every shown match (users asked for detail on all of them)
 SAME_PERSON_MIN_COS = 0.25  # extra photos below this vs the main photo are treated as someone else
 GENDER_VOTE_K = 15
 # The top ArcFace candidates are near-ties (median #1-#2 gap 0.017, far below photo-to-photo noise), and
@@ -136,13 +138,52 @@ def _photo_data_url(entry: Dict[str, Any]) -> Optional[str]:
         return "data:image/jpeg;base64," + base64.b64encode(f.read()).decode("utf-8")
 
 
+DETAILED_MATCH_SCHEMA = (
+    "    {\n"
+    '      "summary": "<이 연예인과 가장 닮은 포인트 한 문장>",\n'
+    '      "reason": "<어느 부위가 어떻게 닮았는지 구체적으로 3문장>",\n'
+    '      "part_notes": {"eyes": "<눈매 비교 한 문장>", "nose": "<코 비교 한 문장>", '
+    '"mouth": "<입매 비교 한 문장>", "face_shape": "<얼굴형·턱선 비교 한 문장>"},\n'
+    '      "differences": ["<눈에 띄게 다른 점 1>", "<다른 점 2>"],\n'
+    '      "matching_points": ["<닮은 점 키워드 1>", "<닮은 점 키워드 2>", "<닮은 점 키워드 3>"],\n'
+    '      "detailed_scores": {"eyes": 0, "nose": 0, "mouth": 0, "face_shape": 0, "features": 0}\n'
+    "    }"
+)
+BRIEF_MATCH_SCHEMA = (
+    "    {\n"
+    '      "summary": "<가장 닮은 포인트 한 문장>",\n'
+    '      "reason": "<어느 부위가 어떻게 닮았는지 2문장>",\n'
+    '      "differences": ["<눈에 띄게 다른 점 한 가지>"],\n'
+    '      "matching_points": ["<닮은 점 키워드 1>", "<닮은 점 키워드 2>"],\n'
+    '      "detailed_scores": {"eyes": 0, "nose": 0, "mouth": 0, "face_shape": 0, "features": 0}\n'
+    "    }"
+)
+USER_FEATURES_SCHEMA = (
+    '  "gender": "<남성 또는 여성>",\n'
+    '  "age_group": "<추정 연령대>",\n'
+    '  "impression_keywords": ["<인상 키워드 1>", "<인상 키워드 2>", "<인상 키워드 3>"],\n'
+    '  "animal_vibe": "<동물상 한 단어와 짧은 설명>",\n'
+    '  "face_shape": "<사용자 얼굴형·턱선 특징 2문장>",\n'
+    '  "eyes": "<사용자 눈매 특징 2문장>",\n'
+    '  "nose": "<사용자 코 특징 1~2문장>",\n'
+    '  "mouth": "<사용자 입매 특징 1~2문장>",\n'
+    '  "overall_vibe": "<전체 인상과 매력 3문장>",\n'
+)
+
+
 async def request_gemma_descriptions(
     user_image_url: str,
     matches: List[Dict[str, Any]],
     llama_url: str,
     model_name: str,
+    mode: str = "full",
+    first_rank: int = 1,
 ) -> Optional[Dict[str, Any]]:
-    """Ask Gemma to describe the user's face and explain each (already chosen) match. None on failure."""
+    """
+    Ask Gemma to describe the user's face and/or explain already chosen matches. None on failure.
+    mode "top": user features + detailed #1 (fast); "others": brief write-ups only; "full": everything at once.
+    Split calls keep each request well under the 60s the public reverse proxy allows.
+    """
     content: List[Dict[str, Any]] = [
         {"type": "text", "text": "[사진 0] 사용자:"},
         {"type": "image_url", "image_url": {"url": user_image_url}},
@@ -153,33 +194,25 @@ async def request_gemma_descriptions(
             content.append({"type": "text", "text": f"\n[사진 {i}] {m['entry']['name']} ({m['entry'].get('category', '연예인')}):"})
             content.append({"type": "image_url", "image_url": {"url": photo}})
 
-    names = ", ".join(f"{i}위 {m['entry']['name']}" for i, m in enumerate(matches, start=1))
+    names = ", ".join(f"{first_rank + i}위 {m['entry']['name']}" for i, m in enumerate(matches))
+    with_features = mode in ("top", "full")
+    schema = BRIEF_MATCH_SCHEMA if mode == "others" else DETAILED_MATCH_SCHEMA
     prompt = (
-        "\n\n당신은 안면 형태학 전문가입니다. 얼굴 인식 AI가 [사진 0] 사용자와 가장 닮은 연예인으로 "
+        "\n\n당신은 안면 형태학 전문가입니다. 얼굴 인식 AI가 [사진 0] 사용자와 닮은 연예인으로 "
         f"{names}을(를) 이미 선정했습니다.\n"
         "연예인 선정은 끝났으므로 이름을 바꾸거나 다른 연예인을 추천하지 마세요.\n"
-        "사진을 직접 비교해서 실제로 보이는 공통점만 구체적으로 쓰세요. 헤어스타일·옷·안경·표정 같은 외적 요소가 아니라 "
-        "눈매, 코, 입매, 얼굴형, 이목구비 배치를 중심으로 설명합니다.\n"
+        "사진을 직접 비교해서 실제로 보이는 공통점과 차이점을 구체적으로 쓰세요. 헤어스타일·옷·안경·표정 같은 외적 요소가 아니라 "
+        "눈매(쌍꺼풀, 눈꼬리, 눈 크기), 코(콧대, 콧볼, 코끝), 입매(입술 두께, 입꼬리), 얼굴형(턱선, 광대, 얼굴 길이), "
+        "이목구비 배치를 중심으로 설명합니다. '부드러운 인상' 같은 막연한 표현만 반복하지 말고 형태를 묘사하세요.\n"
         "detailed_scores는 각 부위가 얼마나 닮았는지 0~100 점수입니다. 부위 간 차이가 드러나도록 솔직하게 매기세요.\n\n"
         "반드시 다음 JSON 형식으로만 출력하세요:\n"
         "{\n"
-        '  "gender": "<남성 또는 여성>",\n'
-        '  "age_group": "<추정 연령대>",\n'
-        '  "face_shape": "<사용자 얼굴형 특징 한 줄>",\n'
-        '  "eyes": "<사용자 눈매 특징 한 줄>",\n'
-        '  "nose_mouth": "<사용자 코와 입매 특징 한 줄>",\n'
-        '  "animal_vibe": "<동물상 및 인상 키워드>",\n'
-        '  "overall_vibe": "<전체 인상 요약 1~2문장>",\n'
+        f"{USER_FEATURES_SCHEMA if with_features else ''}"
         '  "matches": [\n'
-        "    {\n"
-        '      "summary": "<이 연예인과 가장 닮은 포인트 한 줄>",\n'
-        '      "reason": "<어느 부위가 어떻게 닮았는지 2문장>",\n'
-        '      "matching_points": ["<닮은 점 1>", "<닮은 점 2>", "<닮은 점 3>"],\n'
-        '      "detailed_scores": {"eyes": 0, "nose": 0, "mouth": 0, "face_shape": 0, "features": 0}\n'
-        "    }\n"
+        f"{schema}\n"
         "  ]\n"
         "}\n"
-        f"matches 배열은 {len(matches)}개이며 1위부터 순서대로 작성하세요."
+        f"matches 배열은 정확히 {len(matches)}개이며 {names} 순서대로 작성하세요."
     )
     content.append({"type": "text", "text": prompt})
 
@@ -187,21 +220,73 @@ async def request_gemma_descriptions(
         "model": model_name,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.3,
-        "max_tokens": 1400,
+        "max_tokens": {"top": 1600, "others": 1800}.get(mode, 3500),
         "stream": False,
         "cache_prompt": False,
     }
+    started = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=75.0) as client:
+        async with httpx.AsyncClient(timeout=150.0) as client:
             resp = await client.post(f"{llama_url}/v1/chat/completions", json=payload,
                                      headers={"Content-Type": "application/json"})
+        logger.info("gemma describe mode=%s matches=%d took %.1fs status=%s",
+                    mode, len(matches), time.monotonic() - started, resp.status_code)
         if resp.status_code != 200:
-            logger.warning(f"Gemma description call returned {resp.status_code}")
             return None
         return extract_json_block(resp.json()["choices"][0]["message"]["content"])
     except Exception as e:
-        logger.warning(f"Gemma description call failed: {e}")
+        logger.warning(f"Gemma description call failed after {time.monotonic() - started:.1f}s: {e}")
         return None
+
+
+def _format_match(rank: int, entry: Dict[str, Any], percent: int, cosine: Optional[float],
+                  g: Dict[str, Any], pending: bool = False) -> Dict[str, Any]:
+    """One result row. `g` is Gemma's description (may be empty); `pending` leaves texts blank for later."""
+    if pending:
+        summary = reason = ""
+        points: List[str] = []
+    else:
+        summary = g.get("summary") or entry.get("face_type") or "얼굴 인식 AI가 측정한 눈·코·입 배치와 얼굴 윤곽이 가까운 후보입니다."
+        reason = g.get("reason") or entry.get("vibe") or "눈매와 얼굴형 등 이목구비의 전체적인 배치가 유사합니다."
+        points = g.get("matching_points") or [p for p in [entry.get("face_type"), "이목구비 배치", "얼굴 윤곽"] if p]
+    return {
+        "rank": rank,
+        "qid": entry["qid"],
+        "name": entry["name"],
+        "category": entry.get("category", "연예인"),
+        "similarity_percent": percent,
+        "cosine": round(cosine, 4) if cosine is not None else None,
+        "detailed_scores": adjust_part_scores(g.get("detailed_scores"), percent, PART_KEYS),
+        "summary": summary,
+        "reason": reason,
+        "matching_points": [str(p) for p in points][:4],
+        "part_notes": {k: str(v) for k, v in (g.get("part_notes") or {}).items()
+                       if k in PART_KEYS and isinstance(v, (str, int, float))},
+        "differences": [str(d) for d in (g.get("differences") or []) if d][:3],
+        "photo_url": entry["photo_url"],
+        "photo_source": entry.get("photo_source"),
+    }
+
+
+def _format_features(gemma: Dict[str, Any], pending: bool = False) -> Dict[str, Any]:
+    missing = "" if pending else "분석 정보 없음"
+    return {
+        "gender": gemma.get("gender") or "",
+        "age_group": gemma.get("age_group") or "",
+        "keywords": [str(k) for k in (gemma.get("impression_keywords") or []) if k][:4],
+        "face_type": gemma.get("animal_vibe") or missing,
+        "face_shape": gemma.get("face_shape") or missing,
+        "eyes": gemma.get("eyes") or missing,
+        "nose": gemma.get("nose") or "",
+        "mouth": gemma.get("mouth") or "",
+        "nose_mouth": gemma.get("nose_mouth") or " ".join(x for x in (gemma.get("nose"), gemma.get("mouth")) if x) or missing,
+        "overall_vibe": gemma.get("overall_vibe") or ("" if pending else "AI 설명을 생성하지 못해 얼굴 인식 결과만 표시합니다."),
+    }
+
+
+def _gemma_rows(gemma: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = gemma.get("matches") if isinstance(gemma.get("matches"), list) else []
+    return [r if isinstance(r, dict) else {} for r in rows]
 
 
 async def execute_celebrity_lookalike(
@@ -210,7 +295,13 @@ async def execute_celebrity_lookalike(
     llama_url: str = "http://127.0.0.1:8081",
     model_name: str = "gemma-4-e4b-it-q4km",
     extra_images_b64: Optional[List[str]] = None,
+    describe: bool = True,
 ) -> Dict[str, Any]:
+    """
+    Rank celebrities for the user's photo(s). With describe=False the ArcFace ranking returns in ~2s
+    and the texts are left blank (`descriptions_pending`); the client then calls describe_celebrity_matches,
+    because the detailed Gemma write-up for 5 matches takes ~50s.
+    """
     raw_bytes = data_url_to_bytes(image_b64)
 
     entries, matrix = load_celebrity_db()
@@ -226,12 +317,13 @@ async def execute_celebrity_lookalike(
     # (look-alike eval: median rank of the known look-alike 36 -> 18 with 3 photos)
     feats, rejected = [main_feat], 0
     for extra in extra_images_b64 or []:
+        # In group photos use the face that best matches the main photo, not the largest one
         try:
-            feat = extract_face_embedding(data_url_to_bytes(extra))
+            match = best_matching_embedding(data_url_to_bytes(extra), main_feat)
         except Exception:
-            feat = None
-        if feat is not None and float(feat @ main_feat) >= SAME_PERSON_MIN_COS:
-            feats.append(feat)
+            match = None
+        if match is not None and match[1] >= SAME_PERSON_MIN_COS:
+            feats.append(match[0])
         else:
             rejected += 1
     user_feat = np.mean(feats, axis=0)
@@ -250,29 +342,17 @@ async def execute_celebrity_lookalike(
         gender, gender_filter, len(feats), rejected, user_visual is not None,
         ", ".join(f"{m['entry']['name']} {m['percent']}% (cos {m['cosine']:.3f})" for m in matches))
 
-    # 2. Gemma writes the explanations for the fixed matches
-    user_url = image_bytes_to_data_url(raw_bytes, max_dim=768)
-    gemma = await request_gemma_descriptions(user_url, matches[:GEMMA_DESCRIBED], llama_url, model_name) or {}
-    gemma_matches = gemma.get("matches") if isinstance(gemma.get("matches"), list) else []
-
-    formatted = []
-    for rank, m in enumerate(matches, start=1):
-        e = m["entry"]
-        g = gemma_matches[rank - 1] if rank - 1 < len(gemma_matches) and isinstance(gemma_matches[rank - 1], dict) else {}
-        name = e["name"]
-        formatted.append({
-            "rank": rank,
-            "name": name,
-            "category": e.get("category", "연예인"),
-            "similarity_percent": m["percent"],
-            "cosine": round(m["cosine"], 4),
-            "detailed_scores": adjust_part_scores(g.get("detailed_scores"), m["percent"], PART_KEYS),
-            "summary": g.get("summary") or e.get("face_type") or "얼굴 인식 AI가 측정한 눈·코·입 배치와 얼굴 윤곽이 가까운 후보입니다.",
-            "reason": g.get("reason") or e.get("vibe") or "눈매와 얼굴형 등 이목구비의 전체적인 배치가 유사합니다.",
-            "matching_points": g.get("matching_points") or [p for p in [e.get("face_type"), "이목구비 배치", "얼굴 윤곽"] if p],
-            "photo_url": e["photo_url"],
-            "photo_source": e.get("photo_source"),
-        })
+    # 2. Gemma writes the explanations for the fixed matches (now, or later via describe_celebrity_matches)
+    gemma: Dict[str, Any] = {}
+    if describe:
+        user_url = image_bytes_to_data_url(raw_bytes, max_dim=768)
+        gemma = await request_gemma_descriptions(user_url, matches[:GEMMA_DESCRIBED], llama_url, model_name) or {}
+    rows = _gemma_rows(gemma)
+    formatted = [
+        _format_match(rank, m["entry"], m["percent"], m["cosine"],
+                      rows[rank - 1] if rank - 1 < len(rows) else {}, pending=not describe)
+        for rank, m in enumerate(matches, start=1)
+    ]
 
     return {
         "success": True,
@@ -280,14 +360,49 @@ async def execute_celebrity_lookalike(
         "gender_used": gender,
         "photos_used": len(feats),
         "photos_rejected": rejected,
-        "face_features": {
-            "face_type": gemma.get("animal_vibe") or "분석 정보 없음",
-            "face_shape": gemma.get("face_shape") or "분석 정보 없음",
-            "eyes": gemma.get("eyes") or "분석 정보 없음",
-            "nose_mouth": gemma.get("nose_mouth") or "분석 정보 없음",
-            "overall_vibe": gemma.get("overall_vibe") or "AI 설명을 생성하지 못해 얼굴 인식 결과만 표시합니다.",
-        },
+        "descriptions_pending": not describe,
+        "face_features": _format_features(gemma, pending=not describe),
+        "match_strength": celebrity_match_strength(matches[0]["cosine"]) if matches else None,
         "top_celebrity": formatted[0] if formatted else None,
         "candidates": formatted[1:],
         "all_celebrities": formatted,
+    }
+
+
+async def describe_celebrity_matches(
+    image_b64: str,
+    qids: List[str],
+    percents: List[int],
+    llama_url: str,
+    model_name: str,
+    part: str = "all",
+) -> Dict[str, Any]:
+    """
+    Second phase: Gemma descriptions for matches already chosen by execute_celebrity_lookalike.
+    part "top" -> my face features + detailed #1; "others" -> brief #2..#5; "all" -> everything (slow).
+    """
+    entries, _ = load_celebrity_db()
+    by_qid = {e["qid"]: e for e in entries}
+    ranked = [(i, by_qid[q]) for i, q in enumerate(qids[:GEMMA_DESCRIBED]) if q in by_qid]
+    if part == "top":
+        ranked, mode = ranked[:1], "top"
+    elif part == "others":
+        ranked, mode = ranked[1:], "others"
+    else:
+        mode = "full"
+    if not ranked:
+        raise ValueError("설명할 연예인 정보가 없습니다.")
+    user_url = image_bytes_to_data_url(data_url_to_bytes(image_b64), max_dim=768)
+    gemma = await request_gemma_descriptions(user_url, [{"entry": e} for _, e in ranked], llama_url, model_name,
+                                             mode=mode, first_rank=ranked[0][0] + 1)
+    if not gemma:
+        return {"success": False}
+    rows = _gemma_rows(gemma)
+    return {
+        "success": True,
+        "face_features": _format_features(gemma) if mode != "others" else None,
+        "matches": [
+            _format_match(i + 1, e, int(percents[i]) if i < len(percents) else 70, None, rows[n] if n < len(rows) else {})
+            for n, (i, e) in enumerate(ranked)
+        ],
     }

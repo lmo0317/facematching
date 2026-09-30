@@ -118,11 +118,19 @@ def detect_faces_yunet(img_bgr: np.ndarray, score_threshold: float = 0.6) -> Lis
     return rows
 
 
-def compute_square_face_box(fx: int, fy: int, fw: int, fh: int, img_w: int, img_h: int, landmarks: Optional[List[float]] = None) -> Tuple[int, int, int, int]:
-    """Calculate balanced, square (1:1) bounding box centered on head with natural hair and chin margins."""
+# Head-and-shoulders framing: celebrity display photos and the CLIP visual index are built with it
+HEAD_CROP_SCALE, HEAD_CROP_EYE = 1.65, 0.38
+# Face-focused framing for the UI cropper and extra-photo auto crops (users found 1.65 too loose).
+# Face re-detection and ArcFace embeddings are unchanged down to ~1.2x (tested on 250 photos).
+FACE_CROP_SCALE, FACE_CROP_EYE = 1.3, 0.42
+
+
+def compute_square_face_box(fx: int, fy: int, fw: int, fh: int, img_w: int, img_h: int,
+                            landmarks: Optional[List[float]] = None, scale: float = HEAD_CROP_SCALE,
+                            eye_ratio: float = HEAD_CROP_EYE) -> Tuple[int, int, int, int]:
+    """Square (1:1) box of `scale` x face size, eyes placed `eye_ratio` from the top, clamped to the image."""
     face_dim = max(fw, fh)
-    # Headshot crop: comfortable margin for hair headroom, ears, and chin/collar
-    crop_size = int(face_dim * 1.65)
+    crop_size = int(face_dim * scale)
     crop_size = min(crop_size, img_w, img_h)
     crop_size = max(crop_size, 30)
 
@@ -132,8 +140,7 @@ def compute_square_face_box(fx: int, fy: int, fw: int, fh: int, img_w: int, img_
         eye_cx = (rx + lx) / 2.0
         eye_cy = (ry + ly) / 2.0
         cx = int(eye_cx)
-        # Position eyes at ~38% from the top of the crop for balanced portrait framing
-        py = int(eye_cy - int(crop_size * 0.38))
+        py = int(eye_cy - int(crop_size * eye_ratio))
         px = int(cx - crop_size // 2)
     else:
         cx = fx + fw // 2
@@ -207,6 +214,23 @@ def extract_face_features(image_bytes: bytes, with_visual: bool = True) -> Optio
         return None
 
 
+def best_matching_embedding(image_bytes: bytes, reference: np.ndarray) -> Optional[Tuple[np.ndarray, float]]:
+    """(embedding, cosine) of the face in the image most similar to `reference` (e.g. a group photo), or None."""
+    try:
+        img_bgr = decode_image_bgr(image_bytes)
+        if img_bgr is None:
+            return None
+        best = None
+        for row in detect_faces_yunet(img_bgr, 0.6):
+            emb = embed_face(img_bgr, row)
+            if emb is not None and (best is None or float(emb @ reference) > best[1]):
+                best = (emb, float(emb @ reference))
+        return best
+    except Exception as e:
+        logger.warning(f"Error matching faces: {e}")
+        return None
+
+
 # ---- Visual impression (CLIP) -------------------------------------------------------------
 # ArcFace deliberately ignores hair, makeup, expression and pose, but people judge "looks alike"
 # from exactly those. CLIP on the same head crop the UI shows is used to order near-tied matches.
@@ -254,7 +278,7 @@ def visual_embedding(img_bgr: np.ndarray, face_row: np.ndarray) -> Optional[np.n
 #   strangers (3000 pairs)   p50 0.008  p90 0.091  p95 0.114
 #   kin (740 real pairs)     p25 0.076  p50 0.136  p75 0.204  p90 0.285  p95 0.351
 #   same person (567 pairs)  p5 0.325   p10 0.389  p25 0.473  p50 0.567
-#   celebrity top-1 vs DB    p5 0.243   p50 0.327  p90 0.393  p95 0.414
+#   celebrity top-1 vs DB    p5 0.276   p25 0.328  p50 0.360  p90 0.421  p95 0.442  (3,358-person DB)
 SIMILARITY_ANCHORS = {
     # Two photos, "how alike do these two people look". Verdicts: >=82 판박이, >=68 매우 높음, >=50 은근한, >=35 낮음.
     # stranger median -> ~20 (남남), kin median -> ~54 (은근한), kin p75 -> ~68, kin p90 -> ~81, same person -> 95+
@@ -264,10 +288,33 @@ SIMILARITY_ANCHORS = {
     # kin p95 -> ~63 (not "유력"), same-person p10 -> ~71, same-person p25 -> ~85
     "identical": [(-1.0, 1), (0.0, 3), (0.15, 15), (0.25, 35), (0.32, 55), (0.38, 70), (0.47, 85),
                   (0.60, 94), (0.80, 98), (1.0, 99)],
-    # One photo vs a celebrity's multi-photo mean. Typical best match (p50) -> ~72, top 5% -> ~84, same person -> 95+
-    "celebrity": [(-1.0, 5), (0.0, 20), (0.15, 45), (0.24, 60), (0.30, 68), (0.33, 72), (0.37, 78),
-                  (0.42, 85), (0.50, 91), (0.60, 95), (1.0, 99)],
+    # One photo vs a celebrity's multi-photo mean. Aligned with CELEB_TOP1_PERCENTILES so the % and the
+    # "match strength" label agree: p10 -> 60, p50 -> 72, p90 -> 84, p95 -> 87, same person -> 95+
+    "celebrity": [(-1.0, 5), (0.0, 20), (0.15, 40), (0.239, 52), (0.297, 60), (0.328, 66), (0.36, 72),
+                  (0.391, 78), (0.421, 84), (0.442, 87), (0.50, 91), (0.60, 95), (1.0, 99)],
 }
+
+
+# Best-match cosine of other people against the celebrity DB (3,358 people, celebrity photos, self excluded).
+# (cosine, percentile) pairs; used to tell users how strong their #1 match is compared with everyone else's #1.
+CELEB_TOP1_PERCENTILES = [(0.239, 1), (0.276, 5), (0.297, 10), (0.328, 25), (0.360, 50),
+                          (0.391, 75), (0.421, 90), (0.442, 95), (0.575, 99)]
+
+
+def celebrity_match_strength(cosine: float) -> Dict[str, Any]:
+    """Percentile of a #1 match among typical #1 matches, with a short honest Korean label."""
+    xs, ys = zip(*CELEB_TOP1_PERCENTILES)
+    pct = float(np.clip(np.interp(cosine, xs, ys), 0.5, 99.5))
+    top = max(1, int(round(100 - pct)))
+    if pct >= 90:
+        label, detail = "아주 뚜렷한 닮은꼴", f"다른 사람들의 1위 닮은꼴과 비교해 상위 {top}%예요."
+    elif pct >= 60:
+        label, detail = "평균보다 닮은 편", f"다른 사람들의 1위 닮은꼴과 비교해 상위 {top}%예요."
+    elif pct >= 30:
+        label, detail = "보통 수준의 닮음", "다른 사람들이 찾은 1위 닮은꼴과 비슷한 수준이에요."
+    else:
+        label, detail = "약한 닮음", "크게 닮은 연예인은 없어서, 가장 가까운 후보를 보여 드려요."
+    return {"percentile": round(pct, 1), "label": label, "detail": detail}
 
 
 def similarity_to_percent(cosine: float, profile: str = "family") -> int:

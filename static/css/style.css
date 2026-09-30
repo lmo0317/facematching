@@ -128,3 +128,80 @@ body {
   background-color: rgba(0, 0, 0, 0.75) !important;
 }
 
+
+/* ===================== Design system (UI refresh) =====================
+   Near-black navy background, one indigo/violet accent, pink only for the celebrity score.
+   Components: .card, .btn(-primary/-secondary/-ghost/-sm/-icon), .seg + .seg-btn, .chip, .part */
+.app-header {
+  position: sticky; top: 0; z-index: 40;
+  background: rgba(11, 15, 25, 0.85);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.card {
+  background: rgba(17, 24, 39, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 16px;
+}
+.card-inner {
+  background: rgba(2, 6, 23, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+}
+.section-title { font-size: 15px; font-weight: 700; color: #f1f5f9; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 44px; padding: 0 16px; border-radius: 12px;
+  font-size: 14px; font-weight: 600; white-space: nowrap;
+  transition: background-color .15s, opacity .15s, transform .1s;
+}
+.btn:active:not(:disabled) { transform: scale(0.98); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn-primary { background: linear-gradient(90deg, #6366f1, #8b5cf6); color: #fff; box-shadow: 0 8px 24px -8px rgba(99, 102, 241, .6); }
+.btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+.btn-secondary { background: #1e293b; color: #e2e8f0; border: 1px solid #334155; }
+.btn-secondary:hover:not(:disabled) { background: #273449; }
+.btn-ghost { background: transparent; color: #94a3b8; }
+.btn-ghost:hover:not(:disabled) { background: rgba(148, 163, 184, .1); color: #e2e8f0; }
+.btn-lg { height: 52px; font-size: 16px; font-weight: 700; border-radius: 14px; }
+.btn-sm { height: 32px; padding: 0 10px; font-size: 12px; border-radius: 10px; }
+.btn-icon { width: 32px; height: 32px; padding: 0; border-radius: 10px; }
+.btn-danger { color: #fb7185; }
+
+.seg {
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; padding: 4px;
+  background: #0f172a; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 14px;
+}
+.seg-btn {
+  height: 40px; border-radius: 10px; font-size: 14px; font-weight: 600; color: #94a3b8;
+  white-space: nowrap; transition: background-color .15s, color .15s;
+}
+.seg-btn:hover { color: #e2e8f0; }
+.seg-btn.is-active { background: #6366f1; color: #fff; box-shadow: 0 4px 14px -4px rgba(99, 102, 241, .7); }
+.seg-sm .seg-btn { height: 34px; font-size: 13px; }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
+  padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  background: rgba(99, 102, 241, .14); color: #c7d2fe; border: 1px solid rgba(99, 102, 241, .28);
+}
+.chip-amber { background: rgba(245, 158, 11, .14); color: #fcd34d; border-color: rgba(245, 158, 11, .3); }
+.chip-pink { background: rgba(236, 72, 153, .14); color: #f9a8d4; border-color: rgba(236, 72, 153, .3); }
+
+.part-label { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; color: #cbd5e1; margin-bottom: 4px; }
+.part-track { height: 6px; border-radius: 999px; background: #1e293b; overflow: hidden; }
+.part-fill { height: 6px; border-radius: 999px; background: linear-gradient(90deg, #6366f1, #a855f7); transition: width .7s ease; }
+
+details.accordion > summary { list-style: none; cursor: pointer; }
+details.accordion > summary::-webkit-details-marker { display: none; }
+details.accordion[open] .accordion-chevron { transform: rotate(180deg); }
+.accordion-chevron { transition: transform .2s; }
+
+.text-balance { text-wrap: balance; }
+
+/* Korean text: wrap between words, never inside a word */
+body { word-break: keep-all; overflow-wrap: anywhere; }
+/* Horizontal chip rows scroll without a visible scrollbar */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }

@@ -10,7 +10,7 @@ Build celebrity_db.json: Korean celebrities with a multi-photo ArcFace embedding
    normalized embedding.
 4. A face-centered square display photo is written to static/celebrities/.
 
-Usage: python populate_celebrities.py [--limit 2200] [--workers 4]
+Usage: python populate_celebrities.py [--limit 4000] [--workers 4]
 Requires models/face_detection_yunet.onnx and models/arcface_w600k_r50.onnx.
 """
 
@@ -39,20 +39,22 @@ CACHE_DIR = os.path.join(BASE_DIR, "data", "celeb_cache")
 DB_PATH = os.path.join(BASE_DIR, "celebrity_db.json")
 VISUAL_PATH = os.path.join(BASE_DIR, "celebrity_visual.npz")
 
-PHOTOS_PER_PERSON = 10
-THUMB_WIDTH = 960
-MIN_FACE_PX = 60
+PHOTOS_PER_PERSON = 15
+TOPUP_BELOW_MATCHED = 6   # existing people with fewer matched photos than this get extra photos searched
+THUMB_WIDTH = 1280
+MIN_FACE_PX = 36
 SAME_PERSON_COS = 0.40   # ArcFace: different people rarely exceed ~0.3
 DISPLAY_SIZE = 360
 
 GENDER_QIDS = {"Q6581097": "male", "Q6581072": "female"}
 # People per (birth decade, gender), most-known first. Ranking by fame alone gives a DB of mostly
 # 20-something idols, so older users got no genuinely similar face; older decades take everyone available.
-DECADE_QUOTA = {1940: None, 1950: None, 1960: None, 1970: None, 1980: 350, 1990: 330, 2000: 80}
+DECADE_QUOTA = {1940: None, 1950: None, 1960: None, 1970: None, 1980: None, 1990: None, 2000: None}
 OCCUPATION_CATEGORY = [  # first match wins
-    ({"Q177220", "Q488205"}, "가수"),
-    ({"Q33999", "Q10800557", "Q10798782"}, "배우"),
-    ({"Q947873", "Q245068"}, "방송인"),
+    ({"Q177220", "Q488205", "Q2252262", "Q639669", "Q183945"}, "가수"),
+    ({"Q33999", "Q10800557", "Q10798782", "Q2259451"}, "배우"),
+    ({"Q947873", "Q245068", "Q17125263", "Q2405480"}, "방송인"),
+    ({"Q5716684"}, "댄서"),
     ({"Q4610556"}, "모델"),
 ]
 
@@ -164,21 +166,24 @@ CELEBRITY_CATALOG = [
 
 WIKIDATA_QUERY = """
 SELECT ?p ?ko ?en ?gender ?cat ?img ?links ?occ (YEAR(?birth) AS ?born) WHERE {
-  ?p wdt:P27 wd:Q884; wdt:P31 wd:Q5; wdt:P21 ?gender; wdt:P373 ?cat; wikibase:sitelinks ?links.
-  ?p wdt:P106 ?occ. VALUES ?occ { wd:Q33999 wd:Q10800557 wd:Q10798782 wd:Q177220 wd:Q947873 wd:Q4610556 wd:Q245068 wd:Q488205 }
-  ?p wdt:P569 ?birth. FILTER(YEAR(?birth) >= 1950)
+  ?p wdt:P27 wd:Q884; wdt:P31 wd:Q5; wdt:P21 ?gender; wikibase:sitelinks ?links.
+  ?p wdt:P106 ?occ. VALUES ?occ { wd:Q33999 wd:Q10800557 wd:Q10798782 wd:Q177220 wd:Q947873 wd:Q4610556 wd:Q245068 wd:Q488205
+                                  wd:Q2252262 wd:Q639669 wd:Q5716684 wd:Q17125263 wd:Q2405480 wd:Q2259451 wd:Q183945 }
+  ?p wdt:P569 ?birth. FILTER(YEAR(?birth) >= 1940)
   FILTER NOT EXISTS { ?p wdt:P570 ?death }
+  OPTIONAL { ?p wdt:P373 ?cat }
   OPTIONAL { ?p wdt:P18 ?img }
+  FILTER(BOUND(?cat) || BOUND(?img))
   ?p rdfs:label ?ko FILTER(LANG(?ko)="ko")
   OPTIONAL { ?p rdfs:label ?en FILTER(LANG(?en)="en") }
-} ORDER BY DESC(?links) LIMIT 15000
+} ORDER BY DESC(?links) LIMIT 30000
 """
 
 _print_lock = threading.Lock()
 
 # Wikimedia returns 429 when bots go too fast: one shared request clock for all worker threads,
 # and a 429's Retry-After pauses everyone.
-MIN_REQUEST_INTERVAL = 0.35
+MIN_REQUEST_INTERVAL = 0.3
 _rate_lock = threading.Lock()
 _next_request_at = 0.0
 
@@ -243,7 +248,7 @@ def slugify(text: str) -> str:
 
 def fetch_wikidata_people(limit: int) -> dict:
     url = "https://query.wikidata.org/sparql?" + urllib.parse.urlencode({"query": WIKIDATA_QUERY, "format": "json"})
-    rows = http_json(url, timeout=90)["results"]["bindings"]
+    rows = http_json(url, timeout=120)["results"]["bindings"]
     people = {}
     for b in rows:
         qid = b["p"]["value"].rsplit("/", 1)[-1]
@@ -252,7 +257,7 @@ def fetch_wikidata_people(limit: int) -> dict:
             "name": clean_name(b["ko"]["value"]),
             "name_en": clean_name(b.get("en", {}).get("value", "")),
             "gender": GENDER_QIDS.get(b["gender"]["value"].rsplit("/", 1)[-1]),
-            "commons_category": b["cat"]["value"],
+            "commons_category": b.get("cat", {}).get("value"),
             "main_image": b.get("img", {}).get("value", "").rsplit("/", 1)[-1],
             "sitelinks": int(b["links"]["value"]),
             "born": int(b["born"]["value"]) if "born" in b else None,
@@ -319,40 +324,68 @@ def resolve_seed(seed: dict):
     return None
 
 
-def list_commons_photos(person: dict) -> list:
-    """(file title, thumb url) pairs: main Wikidata image first, then deepcat search results."""
-    titles = []
+def _commons_search(query: str, limit: int) -> list:
+    url = "https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode({
+        "action": "query", "list": "search", "srnamespace": 6, "srlimit": limit,
+        "srsearch": f"{query} filetype:bitmap", "format": "json"})
+    return [r["title"] for r in http_json(url).get("query", {}).get("search", [])]
+
+
+def list_commons_photos(person: dict, exclude: set = frozenset(), wanted: int = PHOTOS_PER_PERSON) -> list:
+    """
+    (file title, thumb url, source) for up to `wanted` photos not in `exclude`.
+    Sources: "main" (Wikidata image), "category" (the person's Commons category tree) and "search"
+    (files whose title/description mention the name; only trusted when the face matches the category photos).
+    """
+    main, category, search = [], [], []
     if person.get("main_image"):
-        titles.append("File:" + urllib.parse.unquote(person["main_image"]))
-    if person.get("commons_category"):
-        url = "https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode({
-            "action": "query", "list": "search", "srnamespace": 6, "srlimit": 25,
-            "srsearch": f'deepcat:"{person["commons_category"]}" filetype:bitmap', "format": "json"})
-        try:
-            titles += [r["title"] for r in http_json(url).get("query", {}).get("search", [])]
-        except Exception as e:
-            log(f"[WARN] Commons search failed for {person['name']}: {e}")
-    titles = list(dict.fromkeys(t for t in titles if not re.search(r"(?i)logo|signature|autograph|\.svg$", t)))
-    titles = titles[:PHOTOS_PER_PERSON + 4]
-    if not titles:
+        main.append("File:" + urllib.parse.unquote(person["main_image"]))
+    try:
+        if person.get("commons_category"):
+            category = _commons_search(f'deepcat:"{person["commons_category"]}"', 40)
+        # Name search: skip very short Korean names (e.g. 2-letter stage names) that match many people
+        queries = []
+        if len(person.get("name", "")) >= 3:
+            queries.append(f'"{person["name"]}"')
+        if " " in person.get("name_en", "") or "-" in person.get("name_en", ""):
+            queries.append(f'"{person["name_en"]}"')
+        for q in queries:
+            search += _commons_search(q, 20)
+    except Exception as e:
+        log(f"[WARN] Commons search failed for {person['name']}: {e}")
+
+    def usable(t):
+        return t not in exclude and not re.search(r"(?i)logo|signature|autograph|poster|\.svg$", t)
+
+    ordered, source = [], {}
+    # Interleave so name-search photos are tried even when the category alone is large
+    for t, src in ([(t, "main") for t in main] + [(t, "category") for t in category[:10]]
+                   + [(t, "search") for t in search[:10]] + [(t, "category") for t in category[10:]]
+                   + [(t, "search") for t in search[10:]]):
+        if usable(t) and t not in source:
+            source[t] = src
+            ordered.append(t)
+    ordered = ordered[:wanted + 5]
+    if not ordered:
         return []
 
-    url = "https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode({
-        "action": "query", "titles": "|".join(titles), "prop": "imageinfo",
-        "iiprop": "url|mime", "iiurlwidth": THUMB_WIDTH, "format": "json"})
-    data = http_json(url)
-    # The API normalizes titles (e.g. underscores); map back to what we asked for
-    normalized = {n["to"]: n["from"] for n in data.get("query", {}).get("normalized", [])}
     info = {}
-    for page in data.get("query", {}).get("pages", {}).values():
-        ii = (page.get("imageinfo") or [{}])[0]
-        if ii.get("mime") in ("image/jpeg", "image/png", "image/webp"):
-            info[normalized.get(page["title"], page["title"])] = ii.get("thumburl") or ii.get("url")
-    return [(t, info[t]) for t in titles if t in info][:PHOTOS_PER_PERSON]
+    for i in range(0, len(ordered), 50):
+        url = "https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode({
+            "action": "query", "titles": "|".join(ordered[i:i + 50]), "prop": "imageinfo",
+            "iiprop": "url|mime", "iiurlwidth": THUMB_WIDTH, "format": "json"})
+        data = http_json(url)
+        # The API normalizes titles (e.g. underscores); map back to what we asked for
+        normalized = {n["to"]: n["from"] for n in data.get("query", {}).get("normalized", [])}
+        for page in data.get("query", {}).get("pages", {}).values():
+            ii = (page.get("imageinfo") or [{}])[0]
+            if ii.get("mime") in ("image/jpeg", "image/png", "image/webp"):
+                info[normalized.get(page["title"], page["title"])] = ii.get("thumburl") or ii.get("url")
+    return [(t, info[t], source[t]) for t in ordered if t in info][:wanted]
 
 
 def load_person_photos(person: dict) -> list:
-    """Download (or read cached) photos; returns [(file title, raw bytes)]."""
+    """Download (or read cached, topping up when short) photos; returns [(file title, raw bytes, source)]."""
     folder = os.path.join(CACHE_DIR, person["qid"])
     manifest_path = os.path.join(folder, "manifest.json")
     manifest = None
@@ -361,12 +394,23 @@ def load_person_photos(person: dict) -> list:
             cached = json.load(f)
         # Reuse only complete downloads (older runs lost photos to rate limiting)
         if isinstance(cached, dict) and len(cached["photos"]) >= cached["expected"]:
-            manifest = cached["photos"]
+            manifest = cached
+
+    os.makedirs(folder, exist_ok=True)
     if manifest is None:
-        os.makedirs(folder, exist_ok=True)
-        listed = list_commons_photos(person)
-        manifest = []
-        for i, (title, url) in enumerate(listed):
+        manifest = {"version": 2, "expected": 0, "photos": []}
+        need = PHOTOS_PER_PERSON
+    elif manifest.get("version", 1) < 2 and len(manifest["photos"]) < PHOTOS_PER_PERSON and \
+            person.get("previous_matched", 0) < TOPUP_BELOW_MATCHED:
+        need = PHOTOS_PER_PERSON - len(manifest["photos"])
+    else:
+        need = 0
+
+    if need:
+        have = {m["title"] for m in manifest["photos"]}
+        listed = list_commons_photos(person, exclude=have, wanted=need)
+        start = len(manifest["photos"])
+        for i, (title, url, src) in enumerate(listed, start=start):
             try:
                 data = http_bytes(url)
             except Exception as e:
@@ -375,16 +419,20 @@ def load_person_photos(person: dict) -> list:
             fname = f"{i:02d}.img"
             with open(os.path.join(folder, fname), "wb") as f:
                 f.write(data)
-            manifest.append({"title": title, "file": fname})
+            manifest["photos"].append({"title": title, "file": fname, "source": src})
+        manifest["version"] = 2
+        manifest["expected"] = len(manifest["photos"])
         with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump({"expected": len(listed), "photos": manifest}, f, ensure_ascii=False)
+            json.dump(manifest, f, ensure_ascii=False)
 
+    # Older manifests have no source; the old builder always stored the Wikidata main image first
     photos = []
-    for m in manifest:
+    for n, m in enumerate(manifest["photos"]):
         path = os.path.join(folder, m["file"])
         if os.path.exists(path):
+            src = m.get("source") or ("main" if n == 0 else "category")
             with open(path, "rb") as f:
-                photos.append((m["title"], f.read()))
+                photos.append((m["title"], f.read(), src))
     return photos
 
 
@@ -394,7 +442,8 @@ def consensus_embedding(photos: list):
     Returns (mean embedding, n_matched, (title, img_bgr, face_row) for display) or None.
     """
     faces = []  # (photo index, title, img, face_row, embedding)
-    for idx, (title, data) in enumerate(photos):
+    trusted_photo = {idx for idx, p in enumerate(photos) if p[2] != "search"}
+    for idx, (title, data, _source) in enumerate(photos):
         img = decode_image_bgr(data)
         if img is None:
             continue
@@ -417,14 +466,25 @@ def consensus_embedding(photos: list):
         matches = np.where(sims[i] >= SAME_PERSON_COS)[0]
         supports.append(len({photo_ids[j] for j in matches if photo_ids[j] != photo_ids[i]}))
 
-    if max(supports) > 0:
+    # The anchor must come from the person's own category/main photos: name-search results can show
+    # namesakes, so they only join the average when they match the anchor.
+    trusted = [i for i in range(len(faces)) if photo_ids[i] in trusted_photo]
+    if trusted and max(supports[i] for i in trusted) > 0:
+        anchor = max(trusted, key=lambda i: (supports[i], faces[i][3][2] * faces[i][3][3]))
+    elif not trusted and supports and max(supports) >= 2:
+        # Search-only people: require the face to recur in at least 3 photos
         anchor = max(range(len(faces)), key=lambda i: (supports[i], faces[i][3][2] * faces[i][3][3]))
     else:
-        # No recurring face: trust only a solo face in the Wikidata main image (photo 0)
-        solo_main = [i for i in range(len(faces)) if photo_ids[i] == 0 and (photo_ids == 0).sum() == 1]
-        if not solo_main:
+        # No recurring face: trust the Wikidata main image (photo 0) when one face clearly dominates it
+        # (small background faces are fine; two similar-sized faces are ambiguous)
+        main_faces = sorted((i for i in range(len(faces)) if photo_ids[i] == 0),
+                            key=lambda i: -faces[i][3][2] * faces[i][3][3])
+        if not main_faces or photos[0][2] != "main":
             return None
-        anchor = solo_main[0]
+        areas = [faces[i][3][2] * faces[i][3][3] for i in main_faces]
+        if len(areas) > 1 and areas[0] < 1.5 * areas[1]:
+            return None
+        anchor = main_faces[0]
 
     # Best matching face per photo
     chosen = {}
@@ -508,7 +568,7 @@ def collect_candidates(limit: int) -> list:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=2200, help="max people taken from Wikidata (after decade quotas)")
+    parser.add_argument("--limit", type=int, default=4000, help="max people taken from Wikidata (after decade quotas)")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--visual-only", action="store_true", help="only rebuild celebrity_visual.npz from the current DB")
     args = parser.parse_args()
@@ -522,6 +582,11 @@ def main():
         raise SystemExit("[ERROR] models/face_detection_yunet.onnx and models/arcface_w600k_r50.onnx are required")
 
     candidates = collect_candidates(args.limit)
+    if os.path.exists(DB_PATH):
+        with open(DB_PATH, encoding="utf-8") as f:
+            previous = {e["qid"]: e["n_photos"] for e in json.load(f)}
+        for p in candidates:
+            p["previous_matched"] = previous.get(p["qid"], 0)
 
     # Assign unique display filenames up front (seeds keep theirs; English slugs can collide)
     used = {p["file"] for p in candidates if p.get("file")}

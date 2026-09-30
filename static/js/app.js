@@ -6,7 +6,7 @@ let photo1OriginalData = null; // uncropped original dataURL
 let photo2OriginalData = null; // uncropped original dataURL
 let photoCelebData = null; // dataURL for celebrity search
 let photoCelebOriginalData = null;
-let celebExtraPhotos = []; // extra dataURLs of the same person (max 2), averaged server-side
+let celebExtraPhotos = []; // extra photos of the same person (max 2), face-cropped client-side, averaged server-side
 let detectedFacesCeleb = [];
 let selectedCelebGender = 'auto'; // 'auto' | 'male' | 'female'
 
@@ -29,17 +29,13 @@ function switchMainTab(tab) {
   const secCompare = document.getElementById('section-compare-tab');
   const secCeleb = document.getElementById('section-celeb-tab');
 
-  if (tab === 'compare') {
-    secCompare.classList.remove('hidden');
-    secCeleb.classList.add('hidden');
-    btnCompare.className = 'px-5 sm:px-6 py-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 bg-gradient-to-r from-indigo-600 to-indigo-700 text-white shadow-lg shadow-indigo-600/30';
-    btnCeleb.className = 'px-5 sm:px-6 py-3 rounded-xl text-xs sm:text-sm font-bold text-slate-400 hover:text-white transition flex items-center space-x-2 hover:bg-slate-800/60';
-  } else {
-    secCompare.classList.add('hidden');
-    secCeleb.classList.remove('hidden');
-    btnCeleb.className = 'px-5 sm:px-6 py-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 bg-gradient-to-r from-pink-600 to-indigo-600 text-white shadow-lg shadow-pink-600/30';
-    btnCompare.className = 'px-5 sm:px-6 py-3 rounded-xl text-xs sm:text-sm font-bold text-slate-400 hover:text-white transition flex items-center space-x-2 hover:bg-slate-800/60';
-  }
+  const isCompare = tab === 'compare';
+  secCompare.classList.toggle('hidden', !isCompare);
+  secCeleb.classList.toggle('hidden', isCompare);
+  btnCompare.classList.toggle('is-active', isCompare);
+  btnCeleb.classList.toggle('is-active', !isCompare);
+  btnCompare.setAttribute('aria-selected', String(isCompare));
+  btnCeleb.setAttribute('aria-selected', String(!isCompare));
   lucide.createIcons();
 }
 
@@ -47,12 +43,7 @@ function setCelebGenderFilter(gender) {
   selectedCelebGender = gender;
   ['auto', 'male', 'female'].forEach(g => {
     const btn = document.getElementById(`celeb-filter-${g}`);
-    if (!btn) return;
-    if (g === gender) {
-      btn.className = 'px-3 py-1.5 rounded-md font-bold transition bg-gradient-to-r from-pink-600 to-indigo-600 text-white shadow';
-    } else {
-      btn.className = 'px-3 py-1.5 rounded-md font-medium text-slate-400 hover:text-white transition';
-    }
+    if (btn) btn.classList.toggle('is-active', g === gender);
   });
 }
 
@@ -60,7 +51,7 @@ function setAnalysisMode(mode) {
   currentMode = mode;
   const btnText = document.querySelector('#btn-compare span');
   if (btnText) {
-    btnText.textContent = '두 사람 얼마나 닮았나? 붕어빵 지수 측정';
+    btnText.textContent = '닮음 분석하기';
   }
 }
 
@@ -118,23 +109,22 @@ async function checkServerHealth() {
     const data = await res.json();
     
     if (data.backend?.status === 'connected' && data.backend?.multimodal_enabled) {
-      statusDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
-      statusText.textContent = `Gemma 4 E4B 비전 연결됨 (${data.backend.target_model})`;
-      statusPill.className = 'flex items-center space-x-2 px-3 py-1.5 rounded-full bg-emerald-950/40 border border-emerald-500/30 text-emerald-300';
+      setServerStatus('ok', '분석 서버 연결됨', `분석 서버 연결됨 (${data.backend.target_model})`);
     } else if (data.backend?.status === 'connected') {
-      statusDot.className = 'w-2 h-2 rounded-full bg-amber-400 animate-pulse';
-      statusText.textContent = 'Gemma 4 연결됨 (비전 확인 중)';
-      statusPill.className = 'flex items-center space-x-2 px-3 py-1.5 rounded-full bg-amber-950/40 border border-amber-500/30 text-amber-300';
+      setServerStatus('warn', 'AI 설명 확인 중', 'Gemma 서버는 연결됐지만 이미지 기능 확인 중');
     } else {
-      statusDot.className = 'w-2 h-2 rounded-full bg-rose-500';
-      statusText.textContent = 'Gemma 4 서버 연결 실패';
-      statusPill.className = 'flex items-center space-x-2 px-3 py-1.5 rounded-full bg-rose-950/40 border border-rose-500/30 text-rose-300';
+      setServerStatus('error', 'AI 설명 꺼짐', 'Gemma 서버에 연결할 수 없어 얼굴 인식 결과만 표시합니다');
     }
   } catch (err) {
-    statusDot.className = 'w-2 h-2 rounded-full bg-rose-500';
-    statusText.textContent = '백엔드 서버 응답 없음';
-    statusPill.className = 'flex items-center space-x-2 px-3 py-1.5 rounded-full bg-rose-950/40 border border-rose-500/30 text-rose-300';
+    setServerStatus('error', '서버 응답 없음', '백엔드 서버 응답 없음');
   }
+}
+
+function setServerStatus(level, label, title) {
+  const dotColor = { ok: 'bg-emerald-400', warn: 'bg-amber-400 animate-pulse', error: 'bg-rose-500' }[level];
+  document.getElementById('status-dot').className = `w-2 h-2 rounded-full ${dotColor}`;
+  document.getElementById('status-text').textContent = label;
+  document.getElementById('server-status-pill').title = title;
 }
 
 // Fetch available sample presets
@@ -318,6 +308,7 @@ async function setPhotoFromBlob(blob, targetId, filename = 'image.jpg') {
 
     // Trigger face detection in background
     detectFaces(targetId, dataUrl);
+    if (targetId === 'celeb') refreshCelebExtraMatches();
 
     updateCompareButtonState();
     updateCelebButtonState();
@@ -381,20 +372,84 @@ function clearCelebPhoto() {
 }
 
 const MAX_CELEB_EXTRA = 2;
+// Below this ArcFace cosine to the main photo the server treats a photo as someone else
+const EXTRA_SAME_PERSON_MIN = 0.25;
 
+// Each extra photo: { original, faces, selected, cropped, status: 'detecting' | 'ready' | 'noface' | 'error' }
 async function handleCelebExtraFiles(e) {
   const files = Array.from(e.target.files || []).filter(f => f.type.startsWith('image/'));
+  e.target.value = '';
   for (const file of files) {
     if (celebExtraPhotos.length >= MAX_CELEB_EXTRA) break;
     try {
       const { dataUrl } = await compressImage(file, 800, 0.85);
-      celebExtraPhotos.push(dataUrl);
+      const item = { original: dataUrl, faces: [], selected: null, cropped: null, status: 'detecting' };
+      celebExtraPhotos.push(item);
+      renderCelebExtraPhotos();
+      detectCelebExtraFaces(item);
     } catch (err) {
       console.warn('추가 사진 처리 실패:', err);
     }
   }
-  e.target.value = '';
+}
+
+// Detect faces in an extra photo and auto-pick the one that looks like the main photo's person
+async function detectCelebExtraFaces(item) {
+  try {
+    const res = await fetch(BASE_URL + '/api/detect-faces', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_base64: item.original, reference_image_base64: photoCelebData || null })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    item.faces = data.faces || [];
+    if (!item.faces.length) {
+      item.status = 'noface';
+    } else {
+      // Best match to the main photo when it exists, otherwise the largest face
+      const largest = item.faces.reduce((b, f, i) =>
+        f.box.width * f.box.height > item.faces[b].box.width * item.faces[b].box.height ? i : b, 0);
+      await selectCelebExtraFace(item, data.best_match ?? largest, false);
+      item.status = 'ready';
+    }
+  } catch (err) {
+    console.warn('추가 사진 얼굴 감지 실패:', err);
+    item.status = 'error';
+  }
   renderCelebExtraPhotos();
+}
+
+// Crop the extra photo to the chosen face (same 1:1 head framing as the main photo cropper)
+async function selectCelebExtraFace(item, index, rerender = true) {
+  const face = item.faces[index];
+  if (!face) return;
+  item.selected = index;
+  item.cropped = await cropDataUrl(item.original, face.padded_box);
+  if (rerender) renderCelebExtraPhotos();
+}
+
+function cropDataUrl(dataUrl, box) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const size = Math.min(512, Math.round(box.width));
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      canvas.getContext('2d').drawImage(img, box.x, box.y, box.width, box.height, 0, 0, size, size);
+      resolve(canvas.toDataURL('image/jpeg', 0.9));
+    };
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+}
+
+// Tap a thumbnail to switch to the next detected face in that photo
+function cycleCelebExtraFace(i) {
+  const item = celebExtraPhotos[i];
+  if (!item || item.faces.length < 2) return;
+  selectCelebExtraFace(item, ((item.selected ?? -1) + 1) % item.faces.length);
 }
 
 function removeCelebExtraPhoto(index) {
@@ -402,21 +457,63 @@ function removeCelebExtraPhoto(index) {
   renderCelebExtraPhotos();
 }
 
+// When the main photo changes, re-pick faces in extra photos against the new person
+function refreshCelebExtraMatches() {
+  celebExtraPhotos.forEach(item => {
+    if (item.status === 'ready') {
+      item.status = 'detecting';
+      detectCelebExtraFaces(item);
+    }
+  });
+  renderCelebExtraPhotos();
+}
+
+function celebExtraPayload() {
+  return celebExtraPhotos.filter(p => p.status === 'ready' && p.cropped).map(p => p.cropped);
+}
+
 function renderCelebExtraPhotos() {
   const list = document.getElementById('celeb-extra-list');
   const addBtn = document.getElementById('btn-add-celeb-extra');
   if (!list) return;
   list.innerHTML = '';
-  celebExtraPhotos.forEach((url, i) => {
-    const item = document.createElement('div');
-    item.className = 'relative w-16 h-16 rounded-lg overflow-hidden border border-white/10 bg-slate-800';
-    item.innerHTML = `
-      <img src="${url}" alt="추가 사진 ${i + 1}" class="w-full h-full object-cover">
-      <button type="button" onclick="removeCelebExtraPhoto(${i})" title="삭제"
-        class="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-black/70 text-white text-xs leading-5 text-center hover:bg-rose-600">×</button>`;
-    list.appendChild(item);
+  celebExtraPhotos.forEach((item, i) => {
+    const face = item.selected != null ? item.faces[item.selected] : null;
+    const sim = face?.similarity;
+    let badge = '';
+    let border = 'border-white/10';
+    if (item.status === 'detecting') {
+      badge = '<span class="px-1.5 py-0.5 rounded bg-slate-700/90 text-slate-200">얼굴 찾는 중</span>';
+    } else if (item.status === 'noface') {
+      badge = '<span class="px-1.5 py-0.5 rounded bg-rose-600/90 text-white">얼굴 없음</span>';
+      border = 'border-rose-500/60';
+    } else if (item.status === 'error') {
+      badge = '<span class="px-1.5 py-0.5 rounded bg-rose-600/90 text-white">감지 실패</span>';
+      border = 'border-rose-500/60';
+    } else if (sim != null && sim < EXTRA_SAME_PERSON_MIN) {
+      badge = '<span class="px-1.5 py-0.5 rounded bg-amber-500/90 text-black">다른 사람?</span>';
+      border = 'border-amber-400/70';
+    } else {
+      const multi = item.faces.length > 1 ? ` ${item.selected + 1}/${item.faces.length}` : '';
+      badge = `<span class="px-1.5 py-0.5 rounded bg-emerald-600/90 text-white">얼굴 맞춤${multi}</span>`;
+      border = 'border-emerald-500/60';
+    }
+    const cell = document.createElement('div');
+    cell.className = 'flex flex-col items-center';
+    cell.innerHTML = `
+      <div class="relative w-16 h-16 rounded-lg overflow-hidden border-2 ${border} bg-slate-800 ${item.faces.length > 1 ? 'cursor-pointer' : ''}"
+           ${item.faces.length > 1 ? `onclick="cycleCelebExtraFace(${i})" title="눌러서 다른 얼굴 선택"` : ''}>
+        <img src="${item.cropped || item.original}" alt="추가 사진 ${i + 1}" class="w-full h-full object-cover">
+        <button type="button" onclick="event.stopPropagation(); removeCelebExtraPhoto(${i})" title="삭제"
+          class="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-black/70 text-white text-xs leading-5 text-center hover:bg-rose-600">×</button>
+      </div>
+      <div class="mt-1 text-[10px] font-semibold">${badge}</div>`;
+    list.appendChild(cell);
   });
   if (addBtn) addBtn.disabled = celebExtraPhotos.length >= MAX_CELEB_EXTRA;
+  const multiHint = celebExtraPhotos.some(p => p.faces.length > 1);
+  const hint = document.getElementById('celeb-extra-hint');
+  if (hint) hint.classList.toggle('hidden', !multiHint);
 }
 
 function clearPhoto(targetId) {
@@ -467,9 +564,9 @@ async function detectFaces(targetId, dataUrl) {
     else if (targetId === 2) detectedFaces2 = faces;
     else if (targetId === 'celeb') detectedFacesCeleb = faces;
 
-    if (faces.length > 0 && pill && countEl) {
+    if (faces.length > 1 && pill && countEl) {
       pill.classList.remove('hidden');
-      countEl.textContent = `${faces.length}명의 인물 얼굴 감지됨`;
+      countEl.textContent = `${faces.length}명이 있어요 · 얼굴 고르기`;
       lucide.createIcons();
     } else if (pill) {
       pill.classList.add('hidden');
@@ -648,12 +745,7 @@ function setCropRatio(ratio) {
 
   ratioButtons.forEach(btn => {
     const el = document.getElementById(btn.id);
-    if (!el) return;
-    if (btn.match) {
-      el.className = 'px-2.5 py-1 rounded-md bg-indigo-600 text-white font-medium transition shadow-sm';
-    } else {
-      el.className = 'px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium transition';
-    }
+    if (el) el.classList.toggle('is-active', btn.match);
   });
 }
 
@@ -717,6 +809,7 @@ async function applyCroppedImage() {
       }
 
       closeCropper();
+      if (targetId === 'celeb') refreshCelebExtraMatches();
       updateCompareButtonState();
       updateCelebButtonState();
       lucide.createIcons();
@@ -745,6 +838,7 @@ function restoreOriginalPhoto(targetId) {
   if (targetId === 1) photo1Data = originalData;
   else if (targetId === 2) photo2Data = originalData;
   else if (targetId === 'celeb') photoCelebData = originalData;
+  if (targetId === 'celeb') refreshCelebExtraMatches();
 
   const previewImg = document.getElementById(`preview-img-${targetId}`);
   if (previewImg) previewImg.src = originalData;
@@ -765,12 +859,12 @@ function updateCompareButtonState() {
 
   if (photo1Data && photo2Data) {
     btn.disabled = false;
-    hint.textContent = '사진 2장이 준비되었습니다. 분석 시작 버튼을 누르세요.';
-    hint.className = 'text-xs text-indigo-400 mt-2 font-medium';
+    hint.textContent = '준비됐어요. 분석을 시작하세요.';
+    hint.className = 'text-xs text-indigo-300 mt-2 text-center';
   } else {
     btn.disabled = true;
-    hint.textContent = '두 사진을 모두 등록하면 분석 버튼이 활성화됩니다.';
-    hint.className = 'text-xs text-slate-400 mt-2';
+    hint.textContent = '두 사진을 모두 올리면 분석할 수 있어요.';
+    hint.className = 'text-xs text-slate-500 mt-2 text-center';
   }
 }
 
@@ -782,14 +876,14 @@ function updateCelebButtonState() {
   if (photoCelebData) {
     btn.disabled = false;
     if (hint) {
-      hint.textContent = '내 사진 등록 완료! 버튼을 누르면 닮은 연예인 사진을 찾아옵니다.';
-      hint.className = 'text-xs text-pink-400 mt-2 font-medium';
+      hint.textContent = '준비됐어요. 사진을 더 추가하면 더 정확해요.';
+      hint.className = 'text-xs text-indigo-300 mt-2 text-center';
     }
   } else {
     btn.disabled = true;
     if (hint) {
-      hint.textContent = '내 사진을 등록하면 닮은 연예인 찾기 버튼이 활성화됩니다.';
-      hint.className = 'text-xs text-slate-400 mt-2';
+      hint.textContent = '내 사진을 올리면 찾을 수 있어요.';
+      hint.className = 'text-xs text-slate-500 mt-2 text-center';
     }
   }
 }
@@ -820,22 +914,59 @@ function setupClipboardPaste() {
   });
 }
 
-// Webcam Capture
+// Camera Capture
+// Like phone camera apps: the front camera preview is mirrored and the photo is saved as previewed;
+// the rear camera is shown and saved as-is.
+let webcamFacing = 'user'; // 'user' (front) | 'environment' (rear)
+let webcamMirrored = true;
+
+async function startWebcamStream() {
+  const video = document.getElementById('webcam-video');
+  if (webcamStream) {
+    webcamStream.getTracks().forEach(track => track.stop());
+    webcamStream = null;
+  }
+  webcamStream = await navigator.mediaDevices.getUserMedia({
+    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: { ideal: webcamFacing } }
+  });
+  video.srcObject = webcamStream;
+
+  // Desktop webcams often report no facingMode; treat them as front cameras
+  const actual = webcamStream.getVideoTracks()[0]?.getSettings().facingMode || webcamFacing;
+  webcamMirrored = actual !== 'environment';
+  video.style.transform = webcamMirrored ? 'scaleX(-1)' : '';
+  const label = document.getElementById('webcam-facing-label');
+  if (label) label.textContent = actual === 'environment' ? '후면 카메라' : '전면 카메라 (거울 모드)';
+}
+
 async function openWebcam(targetId) {
   activeWebcamTarget = targetId;
   const modal = document.getElementById('webcam-modal');
-  const video = document.getElementById('webcam-video');
 
   try {
-    webcamStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }
-    });
-    video.srcObject = webcamStream;
+    await startWebcamStream();
     modal.classList.remove('hidden');
     modal.classList.add('flex');
+
+    // Offer front/rear switching only when the device has more than one camera
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cameras = devices.filter(d => d.kind === 'videoinput').length;
+    document.getElementById('btn-webcam-switch')?.classList.toggle('hidden', cameras < 2);
     lucide.createIcons();
   } catch (err) {
-    alert(`웹캠에 접근할 수 없습니다: ${err.message}`);
+    alert(`카메라에 접근할 수 없습니다: ${err.message}`);
+  }
+}
+
+async function switchWebcamFacing() {
+  const previous = webcamFacing;
+  webcamFacing = webcamFacing === 'user' ? 'environment' : 'user';
+  try {
+    await startWebcamStream();
+  } catch (err) {
+    webcamFacing = previous;
+    alert(`카메라를 전환할 수 없습니다: ${err.message}`);
+    await startWebcamStream().catch(() => closeWebcam());
   }
 }
 
@@ -857,6 +988,11 @@ function captureWebcam() {
   canvas.width = video.videoWidth || 640;
   canvas.height = video.videoHeight || 480;
   const ctx = canvas.getContext('2d');
+  if (webcamMirrored) {
+    // Save exactly what the mirrored preview showed
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+  }
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
   canvas.toBlob((blob) => {
@@ -888,10 +1024,10 @@ async function startComparison() {
 
   // Progress animation steps
   const steps = [
-    { title: '사진 최적화 및 안면 검출 중...', step: '1단계: EXIF 회전 보정 및 768px 해상도 최적화', progress: 25 },
-    { title: 'Gemma 4 E4B 비전 인코더 전송 중...', step: '2단계: 멀티모달 프로젝터를 통한 안면 특징 벡터 임베딩', progress: 50 },
-    { title: '이목구비 골격 구조 정밀 대조 중...', step: '3단계: 얼굴형, 눈, 코, 입, 골격 비율 상호 비교', progress: 75 },
-    { title: '최종 유사도 판정 및 감정서 작성 중...', step: '4단계: 종합 유사도 점수 산출 및 전문 소견 생성', progress: 90 },
+    { title: '얼굴을 찾는 중...', step: '두 사진에서 얼굴을 찾아 정렬하고 있어요', progress: 25 },
+    { title: '얼굴 특징 비교 중...', step: '얼굴 인식 AI가 이목구비 구조를 비교하고 있어요', progress: 50 },
+    { title: '부위별로 살펴보는 중...', step: '눈·코·입·얼굴형을 하나씩 비교하고 있어요', progress: 75 },
+    { title: '결과 정리 중...', step: '닮은 점과 다른 점을 정리하고 있어요', progress: 90 },
   ];
 
   let stepIdx = 0;
@@ -942,6 +1078,8 @@ async function startComparison() {
 
 // Render Results View
 function renderResults(data) {
+  document.getElementById('compare-result-img1').src = photo1Data || '';
+  document.getElementById('compare-result-img2').src = photo2Data || '';
   const resultsSection = document.getElementById('results-section');
   resultsSection.classList.remove('hidden');
   resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -998,7 +1136,7 @@ function renderResults(data) {
 
   // Verdict Badge
   const badge = document.getElementById('verdict-badge');
-  badge.className = `inline-flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-bold mb-2 shadow-sm ${badgeClass}`;
+  badge.className = `inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold mb-2 ${badgeClass}`;
   document.getElementById('verdict-dot').className = `w-2 h-2 rounded-full ${dotColor}`;
   document.getElementById('verdict-text').textContent = verdict;
   document.getElementById('verdict-summary').textContent = verdictSummary;
@@ -1028,9 +1166,6 @@ function renderResults(data) {
     document.getElementById(`score-${id}`).textContent = `${v}%`;
     const bar = document.getElementById(`bar-${id}`);
     bar.style.width = `${v}%`;
-    if (v >= 75) bar.className = 'bg-emerald-500 h-1.5 rounded-full transition-all duration-1000';
-    else if (v >= 50) bar.className = 'bg-indigo-500 h-1.5 rounded-full transition-all duration-1000';
-    else bar.className = 'bg-rose-500 h-1.5 rounded-full transition-all duration-1000';
   };
 
   updateBar('face-shape', detailed.face_shape);
@@ -1048,8 +1183,8 @@ function renderResults(data) {
   } else {
     sims.forEach(item => {
       const li = document.createElement('li');
-      li.className = 'flex items-start space-x-2';
-      li.innerHTML = `<span class="text-emerald-400 mt-0.5">•</span><span>${item}</span>`;
+      li.className = 'flex items-start gap-2';
+      li.innerHTML = `<span class="text-emerald-400">•</span><span>${escapeHtml(item)}</span>`;
       simList.appendChild(li);
     });
   }
@@ -1063,8 +1198,8 @@ function renderResults(data) {
   } else {
     diffs.forEach(item => {
       const li = document.createElement('li');
-      li.className = 'flex items-start space-x-2';
-      li.innerHTML = `<span class="text-amber-400 mt-0.5">•</span><span>${item}</span>`;
+      li.className = 'flex items-start gap-2';
+      li.innerHTML = `<span class="text-amber-400">•</span><span>${escapeHtml(item)}</span>`;
       diffList.appendChild(li);
     });
   }
@@ -1078,6 +1213,8 @@ function renderResults(data) {
     data.comprehensive_analysis || '종합 분석 완료';
 
   lucide.createIcons();
+  prepareResultCard('compare');
+
 }
 
 function copyReport() {
@@ -1085,35 +1222,24 @@ function copyReport() {
 
   const r = currentAnalysisResult;
   const modeLabel = currentMode === 'family' ? '가족·붕어빵 닮음도' : currentMode === 'celebrity' ? '닮은꼴 싱크로율' : '동일 인물 정밀 대조';
-  const reportText = `[FaceMatch AI - Gemma 4 E4B 붕어빵·닮은꼴 정밀 감정서]
-- 분석 모드: ${modeLabel}
-- 일시: ${new Date().toLocaleString()}
-- 닮은꼴·붕어빵 지수: ${r.similarity_score}%
-- 최종 판정: ${r.verdict}
-- 핵심 소견: ${r.verdict_summary}
+  const reportText = `[FaceMatch 두 사람 닮음 분석 · ${modeLabel}]
+닮음 지수 ${r.similarity_score}% · ${r.verdict}
+${r.verdict_summary}
 
-[부위별 붕어빵 닮음도]
-- 얼굴형 & 턱선: ${r.detailed_scores?.face_shape || 0}%
-- 눈매 & 눈웃음: ${r.detailed_scores?.eyes || 0}%
-- 콧대 & 코끝: ${r.detailed_scores?.nose || 0}%
-- 입술 & 하관/미소: ${r.detailed_scores?.mouth || 0}%
-- 고유 인상 & 분위기: ${r.detailed_scores?.features || 0}%
+부위별: 눈 ${r.detailed_scores?.eyes || 0}% · 코 ${r.detailed_scores?.nose || 0}% · 입 ${r.detailed_scores?.mouth || 0}% · 얼굴형 ${r.detailed_scores?.face_shape || 0}% · 전체 인상 ${r.detailed_scores?.features || 0}%
 
-[쏙 빼닮은 붕어빵 포인트]
-${(r.similarities || []).map(s => `- ${s}`).join('\n')}
+닮은 점
+${(r.similarities || []).map(x => `- ${x}`).join('\n')}
 
-[각자의 개성적 포인트]
-${(r.differences || []).map(d => `- ${d}`).join('\n')}
+다른 점
+${(r.differences || []).map(x => `- ${x}`).join('\n')}
 
-[나이 및 성별 보정 요인]
-${r.environmental_factors || '-'}
-
-[종합 감정 소견]
+종합 소견
 ${r.comprehensive_analysis || '-'}
 `;
 
   navigator.clipboard.writeText(reportText).then(() => {
-    alert('붕어빵 분석 결과 감정서가 클립보드에 복사되었습니다.');
+    alert('결과를 글로 복사했어요.');
   }).catch(() => {
     alert('클립보드 복사에 실패했습니다.');
   });
@@ -1145,10 +1271,10 @@ async function startCelebritySearch() {
   loadingSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
   const steps = [
-    { title: '얼굴 검출 및 특징 추출 중...', step: '1단계: 얼굴 정렬 후 ArcFace 512차원 얼굴 특징 벡터 추출', progress: 25 },
-    { title: '연예인 얼굴 데이터베이스와 비교 중...', step: '2단계: 연예인별 여러 장의 사진으로 만든 얼굴 특징과 유사도 계산', progress: 50 },
-    { title: '가장 닮은 연예인 TOP 3 선정 중...', step: '3단계: 유사도 순위 및 닮음 점수 산출', progress: 75 },
-    { title: '닮은 부위 설명 작성 중...', step: '4단계: Gemma 4가 사진을 비교해 닮은 포인트 설명', progress: 90 },
+    { title: '얼굴 특징 추출 중...', step: '얼굴을 찾아 특징을 읽고 있어요', progress: 25 },
+    { title: '연예인과 비교 중...', step: '연예인 3천여 명의 얼굴과 비교하고 있어요', progress: 50 },
+    { title: 'TOP 5 고르는 중...', step: '가장 닮은 순서대로 정리하고 있어요', progress: 75 },
+    { title: '닮은 점 설명 작성 중...', step: 'AI가 사진을 비교해 설명을 쓰고 있어요', progress: 90 },
   ];
 
   let stepIdx = 0;
@@ -1162,9 +1288,11 @@ async function startCelebritySearch() {
   try {
     const payload = {
       image_base64: photoCelebData,
-      extra_images_base64: celebExtraPhotos,
-      gender_filter: selectedCelebGender
+      extra_images_base64: celebExtraPayload(),
+      gender_filter: selectedCelebGender,
+      describe: false  // ranking in ~2s; the detailed write-up follows via fetchCelebDescriptions
     };
+    const token = ++celebSearchToken;
 
     const res = await fetch(BASE_URL + '/api/find-celebrity', {
       method: 'POST',
@@ -1181,6 +1309,7 @@ async function startCelebritySearch() {
 
     const json = await res.json();
     renderCelebrityResults(json);
+    fetchCelebDescriptions(json, token);
 
   } catch (err) {
     clearInterval(timer);
@@ -1198,132 +1327,504 @@ function escapeHtml(text) {
   ));
 }
 
-function renderCelebrityResults(data) {
+const PART_LABELS = { eyes: '눈', nose: '코', mouth: '입', face_shape: '얼굴형', features: '인상' };
+let celebSearchToken = 0;
+
+function renderCelebrityResults(data, { scroll = true } = {}) {
   const resultsSection = document.getElementById('celeb-results-section');
   resultsSection.classList.remove('hidden');
-  resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (scroll) resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  lastCelebResult = data;
+  const pending = !!data.descriptions_pending;
+  const waiting = '설명 작성 중…';
 
   const top = data.top_celebrity || {};
   const vibe = data.face_features || {};
   const candidates = data.candidates || [];
 
   const note = document.getElementById('celeb-photo-note');
-  if (note) {
-    const used = data.photos_used || 1;
-    const rejected = data.photos_rejected || 0;
-    note.textContent = rejected > 0
-      ? `사진 ${used}장을 종합해 분석했습니다. 다른 사람으로 보이는 사진 ${rejected}장은 제외했습니다.`
-      : used > 1 ? `사진 ${used}장을 종합해 분석했습니다.` : '';
-    note.classList.toggle('hidden', !note.textContent);
-  }
+  const used = data.photos_used || 1;
+  const rejected = data.photos_rejected || 0;
+  note.textContent = rejected > 0
+    ? `사진 ${used}장을 종합했어요 · 다른 사람으로 보이는 ${rejected}장은 제외`
+    : used > 1 ? `사진 ${used}장을 종합했어요` : '';
+  note.classList.toggle('hidden', !note.textContent);
 
-  // 1. Photos
+  // 1. Photos, name, score ring
   document.getElementById('celeb-result-user-img').src = photoCelebData;
-  const matchImg = document.getElementById('celeb-result-match-img');
-  matchImg.src = top.photo_url || '';
-  document.getElementById('top-celeb-label').textContent = `${top.name || '연예인'} (${top.category || '배우'})`;
-
-  // 2. Titles & Summaries
+  document.getElementById('celeb-result-match-img').src = top.photo_url || '';
+  document.getElementById('top-celeb-label').textContent = top.name || '연예인';
   document.getElementById('top-celeb-name').textContent = top.name || '알 수 없음';
-  document.getElementById('top-celeb-cat').textContent = `(${top.category || '연예인'})`;
-  document.getElementById('top-celeb-summary').textContent = top.summary || '';
-  document.getElementById('top-celeb-reason').textContent = top.reason || '';
+  document.getElementById('top-celeb-cat').textContent = top.category || '';
 
-  // 3. Gauge Score & Counter
-  const score = Math.max(0, Math.min(100, top.similarity_percent || 85));
-  const circle = document.getElementById('celeb-score-circle');
+  const score = Math.max(0, Math.min(100, Number(top.similarity_percent) || 0));
+  const circumference = 2 * Math.PI * 42;
+  document.getElementById('celeb-score-circle').style.strokeDashoffset = circumference - (score / 100) * circumference;
   const scoreValue = document.getElementById('celeb-score-value');
-  const radius = 42;
-  const circumference = 2 * Math.PI * radius;
-  const offset = circumference - (score / 100) * circumference;
-  circle.style.strokeDashoffset = offset;
-
-  let currentVal = 0;
-  const counter = setInterval(() => {
-    currentVal += 2;
-    if (currentVal >= score) {
-      currentVal = score;
-      clearInterval(counter);
-    }
-    scoreValue.textContent = `${currentVal}%`;
-  }, 20);
-
-  const badge = document.getElementById('celeb-match-badge');
-  if (score >= 85) {
-    badge.textContent = '🔥 도플갱어 싱크로율 (완벽한 닮은꼴)';
-    badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-pink-500/20 text-pink-300 border border-pink-500/40';
-  } else if (score >= 75) {
-    badge.textContent = '✨ 매우 높은 닮은꼴 (한눈에 알아볼 정도)';
-    badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40';
+  if (scroll) {
+    let currentVal = 0;
+    const counter = setInterval(() => {
+      currentVal = Math.min(score, currentVal + 2);
+      scoreValue.textContent = `${currentVal}%`;
+      if (currentVal >= score) clearInterval(counter);
+    }, 20);
   } else {
-    badge.textContent = '💫 은근한 매력 닮은꼴 (분위기 싱크로)';
-    badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40';
+    scoreValue.textContent = `${score}%`;
   }
 
-  // 4. Feature Bars
-  const det = top.detailed_scores || {
-    eyes: Math.min(100, score + 2),
-    nose: Math.max(50, score - 3),
-    mouth: Math.min(100, score + 1),
-    face_shape: Math.max(50, score - 2),
-    features: score
-  };
+  // One wording source: the server's match strength (percentile among everyone's #1 match)
+  const strength = data.match_strength;
+  const badge = document.getElementById('celeb-match-badge');
+  badge.textContent = strength?.label || '가장 가까운 후보';
+  badge.className = (strength?.percentile || 0) >= 60 ? 'chip chip-pink' : 'chip';
+  document.getElementById('celeb-strength').textContent = strength?.detail || '';
+  document.getElementById('top-celeb-summary').textContent = top.summary || (pending ? waiting : '');
 
-  const setBar = (id, val) => {
-    const scoreEl = document.getElementById(`celeb-score-${id}`);
-    const barEl = document.getElementById(`celeb-bar-${id}`);
-    if (scoreEl) scoreEl.textContent = `${val}%`;
-    if (barEl) barEl.style.width = `${val}%`;
-  };
-  setBar('eyes', det.eyes || score);
-  setBar('nose', det.nose || score);
-  setBar('mouth', det.mouth || score);
-  setBar('face-shape', det.face_shape || score);
-  setBar('features', det.features || score);
-
-  // 5. Matching Points Tags
-  const pointsContainer = document.getElementById('top-celeb-points');
-  pointsContainer.innerHTML = '';
-  const pts = top.matching_points || ['선한 눈매', '자연스러운 미소', '턱선 비율'];
-  pts.forEach(p => {
-    const chip = document.createElement('span');
-    chip.className = 'px-2.5 py-1 rounded-lg bg-pink-500/15 text-pink-300 border border-pink-500/30 text-xs font-medium';
-    chip.textContent = `#${p}`;
-    pointsContainer.appendChild(chip);
+  // 2. Where they look alike: bars, reason, per-part notes, differences, keywords
+  const det = top.detailed_scores || {};
+  ['eyes', 'nose', 'mouth', 'face_shape', 'features'].forEach(k => {
+    const id = k === 'face_shape' ? 'face-shape' : k;
+    const v = Math.max(0, Math.min(100, Number(det[k]) || score));
+    document.getElementById(`celeb-score-${id}`).textContent = `${v}%`;
+    document.getElementById(`celeb-bar-${id}`).style.width = `${v}%`;
   });
+  document.getElementById('top-celeb-reason').textContent = top.reason || (pending ? waiting : '');
 
-  // 6. User Vibe / Animal face
-  document.getElementById('user-vibe-type').textContent = vibe.face_type || '매력적인 훈남상';
-  document.getElementById('user-vibe-shape').textContent = vibe.face_shape || '부드러운 계란형 윤곽';
-  document.getElementById('user-vibe-eyes').textContent = vibe.eyes || '깊고 차분한 눈빛';
-  document.getElementById('user-vibe-nose-mouth').textContent = vibe.nose_mouth || '오뚝한 콧대와 단정한 입매';
-  document.getElementById('user-vibe-overall').textContent = vibe.overall_vibe || '전반적으로 단정하고 신뢰감을 주는 호감형 인상입니다.';
+  const notes = top.part_notes || {};
+  document.getElementById('top-celeb-part-notes').innerHTML = Object.keys(PART_LABELS)
+    .filter(k => notes[k])
+    .map(k => `<div class="flex gap-3"><dt class="w-12 shrink-0 text-xs font-semibold text-indigo-300 pt-0.5">${PART_LABELS[k]}</dt><dd class="text-slate-300 leading-relaxed">${escapeHtml(notes[k])}</dd></div>`)
+    .join('');
 
-  // 7. Candidates (2nd & 3rd)
+  const diffs = top.differences || [];
+  document.getElementById('top-celeb-differences-wrap').classList.toggle('hidden', !diffs.length);
+  document.getElementById('top-celeb-differences').innerHTML = diffs.map(d => `<li>• ${escapeHtml(d)}</li>`).join('');
+
+  document.getElementById('top-celeb-points').innerHTML =
+    (top.matching_points || []).slice(0, 4).map(p => `<span class="chip">${escapeHtml(p)}</span>`).join('');
+
+  // 3. My face features
+  const setText = (id, value) => { document.getElementById(id).textContent = value || (pending ? waiting : '-'); };
+  document.getElementById('user-vibe-meta').textContent = [vibe.gender, vibe.age_group].filter(Boolean).join(' · ');
+  document.getElementById('user-vibe-keywords').innerHTML =
+    (vibe.keywords || []).map(k => `<span class="chip chip-pink">${escapeHtml(k)}</span>`).join('');
+  setText('user-vibe-type', vibe.face_type);
+  setText('user-vibe-shape', vibe.face_shape);
+  setText('user-vibe-eyes', vibe.eyes);
+  setText('user-vibe-nose', vibe.nose || (!pending && vibe.nose_mouth) || '');
+  setText('user-vibe-mouth', vibe.mouth);
+  setText('user-vibe-overall', vibe.overall_vibe);
+
+  // 4. Other candidates: simple rows (photo, name, category, score); only #1 gets an AI write-up
   const candContainer = document.getElementById('celeb-candidates-container');
   candContainer.innerHTML = '';
   candidates.forEach(c => {
-    const card = document.createElement('div');
-    card.className = 'glass-card rounded-2xl p-4 border border-white/10 flex items-center space-x-4 bg-slate-900/60';
-    
-    const medal = { 2: '🥈 2위', 3: '🥉 3위' }[c.rank] || `${c.rank}위`;
-    card.innerHTML = `
-      <div class="w-16 h-16 rounded-xl overflow-hidden shrink-0 border border-white/10 bg-slate-800">
-        <img src="${escapeHtml(c.photo_url || '')}" alt="${escapeHtml(c.name)}" class="w-full h-full object-cover" onerror="this.style.visibility='hidden'">
-      </div>
+    const pct = Number(c.similarity_percent) || 0;
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-3 py-3 px-1';
+    row.innerHTML = `
+      <span class="w-5 text-center text-sm font-bold text-slate-500 shrink-0">${Number(c.rank) || ''}</span>
+      <img src="${escapeHtml(c.photo_url || '')}" alt="${escapeHtml(c.name)}" class="w-14 h-14 rounded-xl object-cover bg-slate-800 shrink-0" onerror="this.style.visibility='hidden'">
       <div class="flex-1 min-w-0">
-        <div class="flex items-center justify-between mb-1">
-          <span class="text-xs font-bold text-amber-300">${medal}: ${escapeHtml(c.name)} <span class="text-[11px] text-slate-400 font-normal">(${escapeHtml(c.category || '연예인')})</span></span>
-          <span class="px-2 py-0.5 rounded-full text-[11px] font-extrabold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">${Number(c.similarity_percent) || 0}%</span>
-        </div>
-        ${Math.abs((top.similarity_percent || 0) - (Number(c.similarity_percent) || 0)) <= 3
-          ? '<span class="inline-block mb-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30">1위와 비슷한 수준</span>' : ''}
-        <p class="text-xs text-slate-300 truncate">${escapeHtml(c.summary || c.reason || '')}</p>
-        <p class="text-[11px] text-slate-400 line-clamp-1 mt-0.5">${escapeHtml(c.reason || '')}</p>
+        <p class="text-sm font-semibold text-white truncate">${escapeHtml(c.name)}</p>
+        <p class="text-xs text-slate-500 truncate">${escapeHtml(c.category || '')}${Math.abs(score - pct) <= 3 ? ' · 1위와 비슷한 수준' : ''}</p>
       </div>
+      <span class="chip shrink-0">${pct}%</span>
     `;
-    candContainer.appendChild(card);
+    candContainer.appendChild(row);
   });
 
+  prepareResultCard('celeb');
   lucide.createIcons();
+}
+
+// Second phase: fetch the Gemma write-up in two parts so each request stays short
+// (the public reverse proxy cuts requests at 60s): 1) my features + #1 (~20s), 2) #2..#5 (~30s).
+const DESCRIBE_TIMEOUT_MS = 80000;
+
+async function requestCelebDescription(data, part) {
+  const all = data.all_celebrities || [];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DESCRIBE_TIMEOUT_MS);
+  try {
+    const res = await fetch(BASE_URL + '/api/describe-celebrity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        image_base64: photoCelebData,
+        qids: all.map(c => c.qid),
+        percents: all.map(c => c.similarity_percent),
+        part
+      })
+    });
+    const json = res.ok ? await res.json() : null;
+    if (!json?.success) throw new Error(`describe ${part} failed`);
+    return json;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function mergeCelebDescription(data, desc) {
+  const byQid = Object.fromEntries((desc.matches || []).map(m => [m.qid, m]));
+  // keep rank / score / photo from the ranking, take the texts from the description
+  const all = (data.all_celebrities || []).map(c => {
+    const d = byQid[c.qid];
+    return d ? { ...c, ...d, rank: c.rank, similarity_percent: c.similarity_percent, cosine: c.cosine } : c;
+  });
+  return {
+    ...data,
+    face_features: desc.face_features || data.face_features,
+    all_celebrities: all,
+    top_celebrity: all[0],
+    candidates: all.slice(1),
+  };
+}
+
+function setDescribeStatus(text, { spinning = true, retry = false } = {}) {
+  const status = document.getElementById('celeb-describe-status');
+  status.classList.toggle('hidden', !text);
+  document.getElementById('celeb-describe-text').textContent = text || '';
+  status.querySelector('span')?.classList.toggle('hidden', !spinning);
+  document.getElementById('celeb-describe-retry').classList.toggle('hidden', !retry);
+}
+
+async function fetchCelebDescriptions(data, token) {
+  let current = { ...data, descriptions_pending: true };
+  const parts = [
+    { part: 'top', label: '1위 연예인과 내 얼굴 특징을 분석하고 있어요 (약 20초)' },
+  ];
+  for (const { part, label } of parts) {
+    // skip parts that already arrived (e.g. when retrying after a failure)
+    if (part === 'top' && current.top_celebrity?.reason) continue;
+    setDescribeStatus(label);
+    try {
+      const desc = await requestCelebDescription(current, part);
+      if (token !== celebSearchToken) return;  // a newer search replaced this one
+      current = mergeCelebDescription(current, desc);
+      renderCelebrityResults(current, { scroll: false });
+    } catch (err) {
+      if (token !== celebSearchToken) return;
+      renderCelebrityResults({ ...current, descriptions_pending: false }, { scroll: false });
+      setDescribeStatus('설명을 불러오지 못했어요. 순위와 점수는 그대로예요.', { spinning: false, retry: true });
+      return;
+    }
+  }
+  current.descriptions_pending = false;
+  renderCelebrityResults(current, { scroll: false });
+  setDescribeStatus('');
+}
+
+function retryCelebDescriptions() {
+  if (lastCelebResult) fetchCelebDescriptions(lastCelebResult, celebSearchToken);
+}
+
+let lastCelebResult = null;
+
+function resetCelebSearch() {
+  document.getElementById('celeb-results-section').classList.add('hidden');
+  clearCelebPhoto();
+  lastCelebResult = null;
+  resultCardCache.celeb = null;
+  celebSearchToken++;
+  document.getElementById('celeb-describe-status').classList.add('hidden');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// ==========================================
+// Result image card (save / share)
+// ==========================================
+// The result is drawn on a canvas as a 1080px-wide portrait card so people can save or share
+// just the result. Cards are pre-rendered when results arrive: iOS Safari only opens the share
+// sheet right after a tap, so there is no time to build the image at click time.
+const CARD_W = 1080;
+const CARD_PAD = 72;
+const CARD_FONT = "'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', sans-serif";
+const resultCardCache = { compare: null, celeb: null };
+
+function loadImage(src) {
+  return new Promise(resolve => {
+    if (!src) return resolve(null);
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+}
+
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawCoverImage(ctx, img, x, y, size, radius) {
+  ctx.save();
+  roundRectPath(ctx, x, y, size, size, radius);
+  ctx.clip();
+  ctx.fillStyle = '#1e293b';
+  ctx.fillRect(x, y, size, size);
+  if (img) {
+    const s = Math.min(img.width, img.height);
+    ctx.drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, x, y, size, size);
+  }
+  ctx.restore();
+}
+
+// Word-based wrapping (Korean breaks between words); overly long words break by character
+function wrapLines(ctx, text, maxWidth, maxLines = 0) {
+  const words = String(text || '').split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const test = line ? `${line} ${word}` : word;
+    if (ctx.measureText(test).width <= maxWidth) {
+      line = test;
+      continue;
+    }
+    if (line) lines.push(line);
+    line = word;
+    while (ctx.measureText(line).width > maxWidth) {
+      let i = line.length;
+      while (i > 1 && ctx.measureText(line.slice(0, i)).width > maxWidth) i--;
+      lines.push(line.slice(0, i));
+      line = line.slice(i);
+    }
+  }
+  if (line) lines.push(line);
+  if (maxLines && lines.length > maxLines) {
+    const kept = lines.slice(0, maxLines);
+    let last = kept[maxLines - 1];
+    while (last && ctx.measureText(`${last}…`).width > maxWidth) last = last.slice(0, -1);
+    kept[maxLines - 1] = `${last}…`;
+    return kept;
+  }
+  return lines;
+}
+
+// Draws (wrapped) text and returns the y just below it
+function drawText(ctx, text, x, y, { size = 32, weight = 400, color = '#e2e8f0', align = 'left', maxWidth = 0, lineHeight = 1.45, maxLines = 0 } = {}) {
+  ctx.font = `${weight} ${size}px ${CARD_FONT}`;
+  ctx.fillStyle = color;
+  ctx.textAlign = align;
+  ctx.textBaseline = 'top';
+  const lines = maxWidth ? wrapLines(ctx, text, maxWidth, maxLines) : [String(text || '')];
+  lines.forEach((l, i) => ctx.fillText(l, x, y + i * size * lineHeight));
+  return y + lines.length * size * lineHeight;
+}
+
+function drawLabel(ctx, text, x, y, alignRight = false) {
+  ctx.font = `700 26px ${CARD_FONT}`;
+  const w = ctx.measureText(text).width + 28;
+  const bx = alignRight ? x - w : x;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  roundRectPath(ctx, bx, y, w, 44, 12);
+  ctx.fill();
+  drawText(ctx, text, bx + 14, y + 8, { size: 26, weight: 700, color: '#fff' });
+}
+
+function drawRing(ctx, cx, cy, r, pct, color) {
+  ctx.fillStyle = '#111827';
+  ctx.beginPath(); ctx.arc(cx, cy, r + 16, 0, Math.PI * 2); ctx.fill();
+  ctx.lineWidth = 18;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = color;
+  ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.max(0.01, pct / 100)); ctx.stroke();
+  ctx.font = `800 54px ${CARD_FONT}`;
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${pct}%`, cx, cy + 2);
+}
+
+function drawPartBars(ctx, scores, x, y, width) {
+  const items = [['눈', scores.eyes], ['코', scores.nose], ['입', scores.mouth], ['얼굴형', scores.face_shape], ['전체 인상', scores.features]];
+  const colW = (width - 48) / 2;
+  items.forEach(([label, value], i) => {
+    const full = i === 4;
+    const cx = full ? x : x + (i % 2) * (colW + 48);
+    const cy = y + Math.floor(i / 2) * 92;
+    const w = full ? width : colW;
+    const v = Math.max(0, Math.min(100, Number(value) || 0));
+    drawText(ctx, label, cx, cy, { size: 28, weight: 600, color: '#cbd5e1' });
+    drawText(ctx, `${v}%`, cx + w, cy, { size: 28, weight: 700, color: '#e2e8f0', align: 'right' });
+    ctx.fillStyle = '#1e293b';
+    roundRectPath(ctx, cx, cy + 46, w, 14, 7); ctx.fill();
+    const grad = ctx.createLinearGradient(cx, 0, cx + w, 0);
+    grad.addColorStop(0, '#6366f1'); grad.addColorStop(1, '#a855f7');
+    ctx.fillStyle = grad;
+    roundRectPath(ctx, cx, cy + 46, Math.max(14, w * v / 100), 14, 7); ctx.fill();
+  });
+  return y + 3 * 92;
+}
+
+function drawDivider(ctx, y) {
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  ctx.fillRect(CARD_PAD, y, CARD_W - CARD_PAD * 2, 2);
+  return y + 2;
+}
+
+async function buildResultCanvas(kind) {
+  if (document.fonts?.ready) await document.fonts.ready;
+  const canvas = document.createElement('canvas');
+  canvas.width = CARD_W;
+  canvas.height = 8000;
+  const ctx = canvas.getContext('2d');
+  const P = CARD_PAD, W = CARD_W - CARD_PAD * 2, mid = CARD_W / 2;
+  ctx.fillStyle = '#0b0f19';
+  ctx.fillRect(0, 0, CARD_W, canvas.height);
+
+  let y = P;
+  drawText(ctx, 'FaceMatch', P, y, { size: 32, weight: 800, color: '#a5b4fc' });
+  drawText(ctx, kind === 'celeb' ? '닮은 연예인 찾기' : '두 사람 닮음 분석', CARD_W - P, y + 2, { size: 28, color: '#64748b', align: 'right' });
+  y += 96;
+
+  const size = (W - 32) / 2;
+  if (kind === 'celeb') {
+    const data = lastCelebResult;
+    const top = data.top_celebrity || {};
+    const vibe = data.face_features || {};
+    const labels = { eyes: '눈', nose: '코', mouth: '입', face_shape: '얼굴형' };
+    y = drawText(ctx, '나와 가장 닮은 연예인', mid, y, { size: 38, weight: 700, color: '#cbd5e1', align: 'center' }) + 36;
+    const [mine, theirs] = await Promise.all([loadImage(photoCelebData), loadImage(top.photo_url)]);
+    drawCoverImage(ctx, mine, P, y, size, 32);
+    drawCoverImage(ctx, theirs, P + size + 32, y, size, 32);
+    drawLabel(ctx, '나', P + 18, y + 18);
+    drawLabel(ctx, top.name || '', CARD_W - P - 18, y + 18, true);
+    drawRing(ctx, mid, y + size, 92, Number(top.similarity_percent) || 0, '#ec4899');
+    y += size + 92 + 48;
+    y = drawText(ctx, top.name || '', mid, y, { size: 78, weight: 800, color: '#fff', align: 'center' });
+    y = drawText(ctx, [top.category, data.match_strength?.label].filter(Boolean).join(' · '), mid, y + 6, { size: 30, weight: 600, color: '#f9a8d4', align: 'center' }) + 10;
+    if (data.match_strength?.detail) y = drawText(ctx, data.match_strength.detail, mid, y, { size: 26, color: '#64748b', align: 'center', maxWidth: W }) + 10;
+    y = drawText(ctx, top.summary || '', mid, y + 14, { size: 36, color: '#e2e8f0', align: 'center', maxWidth: W - 40, maxLines: 3 }) + 44;
+
+    // Where they look alike
+    y = drawDivider(ctx, y) + 44;
+    y = drawText(ctx, '어디가 닮았나요?', P, y, { size: 36, weight: 700, color: '#fff' }) + 28;
+    y = drawPartBars(ctx, top.detailed_scores || {}, P, y, W) + 8;
+    if (top.reason) y = drawText(ctx, top.reason, P, y, { size: 30, color: '#e2e8f0', maxWidth: W }) + 24;
+    const notes = top.part_notes || {};
+    Object.keys(labels).filter(k => notes[k]).forEach(k => {
+      drawText(ctx, labels[k], P, y, { size: 28, weight: 700, color: '#a5b4fc' });
+      y = drawText(ctx, notes[k], P + 110, y, { size: 28, color: '#cbd5e1', maxWidth: W - 110 }) + 14;
+    });
+    if ((top.differences || []).length) {
+      y = drawText(ctx, '다른 점', P, y + 10, { size: 28, weight: 700, color: '#fcd34d' }) + 8;
+      top.differences.forEach(d => { y = drawText(ctx, `• ${d}`, P, y, { size: 28, color: '#94a3b8', maxWidth: W }) + 6; });
+    }
+
+    // My face features
+    if (vibe.face_shape || vibe.overall_vibe) {
+      y = drawDivider(ctx, y + 30) + 44;
+      y = drawText(ctx, '내 얼굴 특징', P, y, { size: 36, weight: 700, color: '#fff' }) + 12;
+      const meta = [vibe.gender, vibe.age_group, ...(vibe.keywords || [])].filter(Boolean).join(' · ');
+      if (meta) y = drawText(ctx, meta, P, y, { size: 28, weight: 600, color: '#f9a8d4', maxWidth: W }) + 20;
+      [['인상', vibe.face_type], ['얼굴형', vibe.face_shape], ['눈매', vibe.eyes],
+       ['코', vibe.nose || vibe.nose_mouth], ['입', vibe.mouth]].forEach(([label, text]) => {
+        if (!text || text === '분석 정보 없음') return;
+        drawText(ctx, label, P, y, { size: 28, weight: 700, color: '#a5b4fc' });
+        y = drawText(ctx, text, P + 110, y, { size: 28, color: '#cbd5e1', maxWidth: W - 110 }) + 14;
+      });
+      if (vibe.overall_vibe) y = drawText(ctx, vibe.overall_vibe, P, y + 8, { size: 30, color: '#e2e8f0', maxWidth: W }) + 10;
+    }
+
+    // Other candidates: photo, name, category, score
+    const others = data.candidates || [];
+    if (others.length) {
+      y = drawDivider(ctx, y + 30) + 44;
+      y = drawText(ctx, '다른 후보', P, y, { size: 36, weight: 700, color: '#fff' }) + 24;
+      const imgs = await Promise.all(others.map(c => loadImage(c.photo_url)));
+      others.forEach((c, i) => {
+        drawText(ctx, String(c.rank), P, y + 30, { size: 30, weight: 700, color: '#64748b' });
+        drawCoverImage(ctx, imgs[i], P + 44, y, 96, 22);
+        drawText(ctx, c.name, P + 164, y + 10, { size: 34, weight: 700, color: '#fff' });
+        drawText(ctx, c.category || '', P + 164, y + 56, { size: 26, color: '#64748b' });
+        drawText(ctx, `${c.similarity_percent}%`, CARD_W - P, y + 28, { size: 34, weight: 700, color: '#c7d2fe', align: 'right' });
+        y += 124;
+      });
+    }
+  } else {
+    const r = currentAnalysisResult;
+    y = drawText(ctx, '두 사람은 얼마나 닮았을까?', mid, y, { size: 38, weight: 700, color: '#cbd5e1', align: 'center' }) + 36;
+    const [a, b] = await Promise.all([loadImage(photo1Data), loadImage(photo2Data)]);
+    drawCoverImage(ctx, a, P, y, size, 32);
+    drawCoverImage(ctx, b, P + size + 32, y, size, 32);
+    const ringColor = document.getElementById('score-circle')?.style.stroke || '#6366f1';
+    drawRing(ctx, mid, y + size, 92, Number(r.similarity_score) || 0, ringColor);
+    y += size + 92 + 48;
+    y = drawText(ctx, r.verdict || '', mid, y, { size: 56, weight: 800, color: '#fff', align: 'center', maxWidth: W }) + 20;
+    y = drawText(ctx, r.verdict_summary || '', mid, y, { size: 34, color: '#e2e8f0', align: 'center', maxWidth: W - 40, maxLines: 3 }) + 44;
+    y = drawDivider(ctx, y) + 44;
+    y = drawText(ctx, '부위별 닮음', P, y, { size: 36, weight: 700, color: '#fff' }) + 28;
+    y = drawPartBars(ctx, r.detailed_scores || {}, P, y, W) + 8;
+    const section = (title, items, color) => {
+      if (!items?.length) return;
+      y = drawText(ctx, title, P, y + 16, { size: 32, weight: 700, color }) + 12;
+      items.slice(0, 2).forEach(t => {
+        y = drawText(ctx, `• ${t}`, P, y, { size: 29, color: '#cbd5e1', maxWidth: W, maxLines: 2 }) + 8;
+      });
+    };
+    section('닮은 점', r.similarities, '#6ee7b7');
+    section('다른 점', r.differences, '#fcd34d');
+  }
+
+  y += 48;
+  y = drawDivider(ctx, y) + 32;
+  y = drawText(ctx, 'minohlee.mooo.com/facematching', mid, y, { size: 26, color: '#475569', align: 'center' }) + P - 20;
+
+  const out = document.createElement('canvas');
+  out.width = CARD_W;
+  out.height = Math.ceil(y);
+  out.getContext('2d').drawImage(canvas, 0, 0);
+  return out;
+}
+
+function prepareResultCard(kind) {
+  resultCardCache[kind] = buildResultCanvas(kind)
+    .then(c => new Promise(resolve => c.toBlob(resolve, 'image/png')))
+    .catch(err => { console.warn('결과 이미지 생성 실패:', err); return null; });
+}
+
+async function getResultCardBlob(kind) {
+  if (!resultCardCache[kind]) prepareResultCard(kind);
+  const blob = await resultCardCache[kind];
+  if (!blob) throw new Error('image build failed');
+  return blob;
+}
+
+async function saveResultImage(kind) {
+  try {
+    const blob = await getResultCardBlob(kind);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `facematch_${kind === 'celeb' ? 'celebrity' : 'compare'}_${Date.now()}.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (err) {
+    alert('결과 이미지를 만들지 못했어요. 잠시 후 다시 시도해 주세요.');
+  }
+}
+
+async function shareResultImage(kind) {
+  try {
+    const blob = await getResultCardBlob(kind);
+    const file = new File([blob], `facematch_${kind}.png`, { type: 'image/png' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: 'FaceMatch 결과' });
+      return;
+    }
+    await saveResultImage(kind);
+    alert('이 기기에서는 바로 공유할 수 없어 이미지로 저장했어요.');
+  } catch (err) {
+    if (err?.name !== 'AbortError') alert('공유하지 못했어요.');
+  }
 }
